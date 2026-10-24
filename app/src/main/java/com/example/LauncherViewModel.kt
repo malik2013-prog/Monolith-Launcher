@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Application
+import android.view.Surface
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.GeminiHybridAssistant
@@ -9,23 +10,22 @@ import com.example.auth.MinecraftAccount
 import com.example.controller.ControllerProfileStorage
 import com.example.controller.GlfwKeyBinding
 import com.example.controller.VirtualControlNode
-import com.example.engine.MinecraftVoxelGlRenderer
-import com.example.engine.VoxelBlockType
-import com.example.engine.VoxelWorld
 import com.example.pojavruntime.AiCrashAndHardwareEngine
 import com.example.pojavruntime.AssetPrepareProgress
 import com.example.pojavruntime.CrashDiagnosis
 import com.example.pojavruntime.GcAlgorithm
 import com.example.pojavruntime.HardwareProfile
 import com.example.pojavruntime.JavaRuntimeMajor
+import com.example.pojavruntime.JavaRuntimeManager
 import com.example.pojavruntime.JvmRuntimeConfig
+import com.example.pojavruntime.MinecraftLauncherCore
 import com.example.pojavruntime.MinecraftVersion
 import com.example.pojavruntime.MobileGlRenderer
 import com.example.pojavruntime.MojangComponentsStatus
-import com.example.pojavruntime.MojangManifestLoader
+import com.example.pojavruntime.MojangDownloader
 import com.example.pojavruntime.OneClickFixAction
 import com.example.pojavruntime.PojavLaunchSpec
-import com.example.pojavruntime.PojavProcessLauncher
+import com.example.pojavruntime.PojavNativeBridge
 import com.example.pojavruntime.VanillaEra
 import com.example.skineditor.MojangAndElySkinClient
 import com.example.skineditor.ProceduralAiSkinSynthesizer
@@ -35,13 +35,14 @@ import com.example.skineditor.SkinTool
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 
 enum class LauncherDestination(val title: String) {
     PLAY_HUB("Запуск"),
-    GAME_SESSION("Игра 3D"),
+    GAME_SESSION("Сессия JVM"),
     TOUCH_CONTROLLER("Контроллер"),
     SKIN_STUDIO("Скины 2D/3D"),
     ACCOUNTS_AUTH("Аккаунты"),
@@ -58,6 +59,7 @@ data class LauncherUiState(
     val versionSearchQuery: String = "",
     val selectedVersion: MinecraftVersion? = null,
     val isFetchingManifest: Boolean = false,
+    val manifestErrorMessage: String? = null,
     val prepareProgress: AssetPrepareProgress? = null,
     val mojangComponentsStatus: MojangComponentsStatus = MojangComponentsStatus(),
     val runtimeConfig: JvmRuntimeConfig = JvmRuntimeConfig(),
@@ -73,22 +75,16 @@ data class LauncherUiState(
     val virtualMouseY: Float = 0.5f,
     val analogVectorX: Float = 0f,
     val analogVectorY: Float = 0f,
-    val cameraYaw: Float = 135f,
-    val cameraPitch: Float = -12f,
-    val playerX: Float = 15.5f,
-    val playerY: Float = 10.0f,
-    val playerZ: Float = 15.5f,
-    val selectedHotbarSlot: Int = 0,
-    val hotbarBlocks: List<VoxelBlockType> = VoxelBlockType.hotbarBlocks,
-    val showInventoryModal: Boolean = false,
+    val cameraYaw: Float = 0f,
+    val cameraPitch: Float = 0f,
+    val surfaceWidth: Int = 1920,
+    val surfaceHeight: Int = 1080,
+    val isSurfaceBound: Boolean = false,
     val showPauseMenuModal: Boolean = false,
-    val isThirdPersonView: Boolean = false,
-    val loadedMojangJarTextures: Boolean = false,
-    val targetedBlockInfo: String = "Block: Grass Block",
     val gameLogs: List<String> = emptyList(),
     val isGameSessionRunning: Boolean = false,
     val showSessionDebugF3: Boolean = false,
-    val showSessionConsoleDrawer: Boolean = false,
+    val showSessionConsoleDrawer: Boolean = true,
     val skinFormat: SkinFormat = SkinFormat.MODERN_64X64,
     val skinPixels: IntArray = IntArray(64 * 64),
     val skinTool: SkinTool = SkinTool.PENCIL,
@@ -109,15 +105,19 @@ data class LauncherUiState(
 class LauncherViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
-    private val manifestLoader = MojangManifestLoader()
-    private val processLauncher = PojavProcessLauncher()
+    val minecraftRootDir: File =
+        appContext.getExternalFilesDir("minecraft") ?: File(appContext.filesDir, "minecraft").apply { mkdirs() }
+
+    private val mojangDownloader = MojangDownloader()
+    private val javaRuntimeManager = JavaRuntimeManager()
+    private val launcherCore = MinecraftLauncherCore(mojangDownloader, javaRuntimeManager)
     private val aiEngine = AiCrashAndHardwareEngine()
     private val authManager = AuthAccountManager()
     private val skinClient = MojangAndElySkinClient()
     private val geminiAssistant = GeminiHybridAssistant()
 
-    val voxelWorld = VoxelWorld()
-    var activeGlRenderer: MinecraftVoxelGlRenderer? = null
+    @Volatile
+    private var activeRenderSurface: Surface? = null
 
     private val skinUndoStack = ArrayDeque<IntArray>()
 
@@ -132,35 +132,34 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             prompt = "Monolith Emerald Knight Visor",
             format = SkinFormat.MODERN_64X64
         )
-        val curatedVersions = manifestLoader.curatedHistoricalCatalog()
-        val firstVer = curatedVersions.first()
-        val hwProfile = aiEngine.inspectAndTuneHardware(appContext, firstVer, 120)
-        val initialCompStatus = manifestLoader.inspectInstalledComponents(firstVer, appContext.filesDir)
-
-        val defaultLogs = listOf(
-            "[08:10:01] [PojavCore/INFO]: Monolith Vanilla Runner initialized on ${hwProfile.socName} (${hwProfile.primaryAbi})",
-            "[08:10:02] [PojavCore/INFO]: GL4ES 1.1.5 & ANGLE Vulkan translators ready.",
-            "[08:10:02] [MojangManifest/INFO]: Loaded Vanilla Version Manifest V2."
+        val placeholderVer = MinecraftVersion(
+            id = "1.21.4",
+            era = VanillaEra.RELEASE,
+            releaseTime = "2024-12-03",
+            manifestUrl = "",
+            sha1 = "",
+            recommendedJava = JavaRuntimeMajor.JRE_21,
+            mainClass = "net.minecraft.client.main.Main",
+            assetsIndex = "1.21",
+            summary = "Загрузка официального манифеста Mojang..."
         )
-        val initialDiagnosis = aiEngine.analyzeLogOrCrash(
-            logText = defaultLogs.joinToString("\n"),
-            targetVersion = firstVer,
-            currentConfig = JvmRuntimeConfig(allocatedMemoryMb = hwProfile.recommendedHeapMb)
+        val hwProfile = aiEngine.inspectAndTuneHardware(appContext, placeholderVer, 120)
+
+        val initLogs = listOf(
+            "[MojangDownloader]: Инициализация каталога игры: ${minecraftRootDir.absolutePath}",
+            "[JavaRuntimeManager]: Каталог рантаймов OpenJDK: ${appContext.filesDir.resolve("runtimes").absolutePath}",
+            "[MinecraftLauncherCore]: Готов к загрузке https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
         )
 
         _uiState.update {
             it.copy(
                 splashQuote = splashes.randomOrNull() ?: "100% Pure Vanilla!",
                 allSplashQuotes = splashes,
-                versions = curatedVersions,
-                selectedVersion = firstVer,
-                mojangComponentsStatus = initialCompStatus,
                 accounts = initialAccounts,
                 controllerNodes = initialController,
                 skinPixels = initialSkin,
                 hardwareProfile = hwProfile,
-                gameLogs = defaultLogs,
-                crashDiagnosis = initialDiagnosis,
+                gameLogs = initLogs,
                 runtimeConfig = it.runtimeConfig.copy(
                     allocatedMemoryMb = hwProfile.recommendedHeapMb,
                     renderer = hwProfile.recommendedRenderer,
@@ -184,6 +183,13 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private fun appendLogLine(line: String) {
+        _uiState.update { cur ->
+            val updatedLogs = (cur.gameLogs + line).takeLast(200)
+            cur.copy(gameLogs = updatedLogs)
+        }
+    }
+
     fun cycleSplashQuote() {
         val list = _uiState.value.allSplashQuotes
         if (list.isNotEmpty()) {
@@ -196,57 +202,63 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             it.copy(
                 currentDestination = destination,
                 isGameSessionRunning = destination == LauncherDestination.GAME_SESSION,
-                showPauseMenuModal = false,
-                showInventoryModal = false
+                showPauseMenuModal = false
             )
         }
     }
 
     fun exitFullscreenGameToLauncher() {
-        activeGlRenderer?.moveInputX = 0f
-        activeGlRenderer?.moveInputY = 0f
+        launcherCore.terminateActiveSession()
         val ver = _uiState.value.selectedVersion
-        val updatedStatus = manifestLoader.inspectInstalledComponents(ver, appContext.filesDir)
+        val updatedStatus = mojangDownloader.inspectInstalledComponents(ver, minecraftRootDir, appContext.filesDir)
         _uiState.update {
             it.copy(
                 currentDestination = LauncherDestination.PLAY_HUB,
                 isGameSessionRunning = false,
                 showPauseMenuModal = false,
-                showInventoryModal = false,
                 mojangComponentsStatus = updatedStatus
             )
         }
-    }
-
-    fun getDownloadedClientJarFile(): File? {
-        val verId = _uiState.value.selectedVersion?.id ?: return null
-        return File(appContext.filesDir, "minecraft/versions/$verId/$verId.jar")
-    }
-
-    fun notifyMojangTextureSourceResolved(fromMojangJar: Boolean) {
-        _uiState.update { it.copy(loadedMojangJarTextures = fromMojangJar) }
     }
 
     fun toggleDynamicMaterialYou(enabled: Boolean) {
         _uiState.update { it.copy(useDynamicMaterialYou = enabled) }
     }
 
-    // --- 1. Mojang Manifest & Version Management ---
+    // --- 1. Реальный загрузчик Mojang (MojangDownloader.kt) ---
 
     fun refreshMojangManifest() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isFetchingManifest = true) }
-            val loaded = manifestLoader.fetchVanillaVersions(appContext.cacheDir)
-            _uiState.update { state ->
-                val currentId = state.selectedVersion?.id
+            _uiState.update { it.copy(isFetchingManifest = true, manifestErrorMessage = null) }
+            appendLogLine("[MojangDownloader]: Запрос манифеста ${MojangDownloader.VERSION_MANIFEST_V2_URL}...")
+
+            val result = mojangDownloader.fetchOfficialVersionManifest(minecraftRootDir)
+            result.onSuccess { loaded ->
+                val currentId = _uiState.value.selectedVersion?.id
                 val chosen = loaded.firstOrNull { it.id == currentId } ?: loaded.firstOrNull()
-                val compStatus = manifestLoader.inspectInstalledComponents(chosen, appContext.filesDir)
-                state.copy(
-                    versions = loaded,
-                    selectedVersion = chosen,
-                    mojangComponentsStatus = compStatus,
-                    isFetchingManifest = false
+                val compStatus = mojangDownloader.inspectInstalledComponents(
+                    chosen,
+                    minecraftRootDir,
+                    appContext.filesDir
                 )
+                appendLogLine("[MojangDownloader]: Получено ${loaded.size} официальных версий Mojang.")
+                _uiState.update { state ->
+                    state.copy(
+                        versions = loaded,
+                        selectedVersion = chosen,
+                        mojangComponentsStatus = compStatus,
+                        isFetchingManifest = false,
+                        manifestErrorMessage = null
+                    )
+                }
+            }.onFailure { err ->
+                appendLogLine("[MojangDownloader/ERROR]: Не удалось загрузить манифест: ${err.message}")
+                _uiState.update { state ->
+                    state.copy(
+                        isFetchingManifest = false,
+                        manifestErrorMessage = err.message ?: "Ошибка сети при обращении к piston-meta.mojang.com"
+                    )
+                }
             }
         }
     }
@@ -265,10 +277,14 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             targetVersion = version,
             targetFps = _uiState.value.runtimeConfig.targetFps
         )
-        val compStatus = manifestLoader.inspectInstalledComponents(version, appContext.filesDir)
+        val compStatus = mojangDownloader.inspectInstalledComponents(
+            version,
+            minecraftRootDir,
+            appContext.filesDir
+        )
         _uiState.update { state ->
             val updatedRuntime = if (state.runtimeConfig.autoSelectJava) {
-                state.runtimeConfig.copy(selectedJava = version.recommendedJava)
+                state.runtimeConfig.copy(selectedJava = JavaRuntimeMajor.fromMajor(compStatus.resolvedJavaMajor))
             } else {
                 state.runtimeConfig
             }
@@ -282,16 +298,42 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Отдельная кнопка установки и проверки всех официальных компонентов Mojang без немедленного входа в 3D-окно.
+     * Скачивает все официальные файлы выбранной версии Mojang + портативную OpenJDK (aarch64)
+     * с выводом реального прогресса и логов.
      */
     fun installMojangComponentsOnly() {
         val version = _uiState.value.selectedVersion ?: return
         viewModelScope.launch {
-            manifestLoader.prepareAndVerifyVersion(version, appContext.filesDir)
-                .collect { progress ->
-                    _uiState.update { it.copy(prepareProgress = progress) }
-                }
-            val updatedStatus = manifestLoader.inspectInstalledComponents(version, appContext.filesDir)
+            mojangDownloader.downloadVersionComplete(
+                version = version,
+                minecraftRootDir = minecraftRootDir,
+                onLogLine = ::appendLogLine
+            ).catch { err ->
+                appendLogLine("[MojangDownloader/ERROR]: ${err.message}")
+                _uiState.update { it.copy(prepareProgress = null) }
+            }.collect { progress ->
+                _uiState.update { it.copy(prepareProgress = progress) }
+            }
+
+            // Проверяем/скачиваем требуемый рантайм OpenJDK (aarch64)
+            val versionJsonFile = File(minecraftRootDir, "versions/${version.id}/${version.id}.json")
+            val requiredJava = javaRuntimeManager.resolveRequiredJavaFromVersionJson(versionJsonFile, version)
+
+            javaRuntimeManager.ensureJavaRuntimeInstalled(
+                filesDir = appContext.filesDir,
+                javaMajor = requiredJava,
+                onLogLine = ::appendLogLine
+            ).catch { err ->
+                appendLogLine("[JavaRuntimeManager/ERROR]: ${err.message}")
+            }.collect { jreProgress ->
+                _uiState.update { it.copy(prepareProgress = jreProgress) }
+            }
+
+            val updatedStatus = mojangDownloader.inspectInstalledComponents(
+                version,
+                minecraftRootDir,
+                appContext.filesDir
+            )
             _uiState.update {
                 it.copy(
                     prepareProgress = null,
@@ -301,7 +343,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    // --- 2. PojavLauncher Core Execution & Full-Screen 3D Game Launch ---
+    // --- 2. Полный цикл скачивания и нативного запуска Minecraft: Java Edition ---
 
     fun launchSelectedVanillaVersion() {
         val state = _uiState.value
@@ -311,13 +353,48 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             ?: authManager.createOfflineAccount("Player")
 
         viewModelScope.launch {
-            manifestLoader.prepareAndVerifyVersion(version, appContext.filesDir)
-                .collect { progress ->
-                    _uiState.update { it.copy(prepareProgress = progress) }
-                }
+            var downloadFailed = false
 
-            val updatedStatus = manifestLoader.inspectInstalledComponents(version, appContext.filesDir)
+            // 1. Скачивание <id>.json, client.jar (SHA-1), всех Maven-библиотек и всех ассетов (Semaphore(16))
+            mojangDownloader.downloadVersionComplete(
+                version = version,
+                minecraftRootDir = minecraftRootDir,
+                onLogLine = ::appendLogLine
+            ).catch { err ->
+                downloadFailed = true
+                appendLogLine("[MojangDownloader/FATAL]: Сбой загрузки файлов Mojang: ${err.message}")
+                _uiState.update { it.copy(prepareProgress = null) }
+            }.collect { progress ->
+                _uiState.update { it.copy(prepareProgress = progress) }
+            }
 
+            if (downloadFailed) return@launch
+
+            // 2. Определение javaVersion.majorVersion из скачанного JSON и установка OpenJDK (aarch64)
+            val versionJsonFile = File(minecraftRootDir, "versions/${version.id}/${version.id}.json")
+            val requiredJava = if (_uiState.value.runtimeConfig.autoSelectJava) {
+                javaRuntimeManager.resolveRequiredJavaFromVersionJson(versionJsonFile, version)
+            } else {
+                _uiState.value.runtimeConfig.selectedJava
+            }
+
+            javaRuntimeManager.ensureJavaRuntimeInstalled(
+                filesDir = appContext.filesDir,
+                javaMajor = requiredJava,
+                onLogLine = ::appendLogLine
+            ).catch { err ->
+                appendLogLine("[JavaRuntimeManager/WARN]: ${err.message}")
+            }.collect { jreProgress ->
+                _uiState.update { it.copy(prepareProgress = jreProgress) }
+            }
+
+            val updatedStatus = mojangDownloader.inspectInstalledComponents(
+                version,
+                minecraftRootDir,
+                appContext.filesDir
+            )
+
+            // 3. Переход на экран с TextureView + Touch Overlay и запуск виртуальной машины Java
             _uiState.update {
                 it.copy(
                     prepareProgress = null,
@@ -325,21 +402,22 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                     currentDestination = LauncherDestination.GAME_SESSION,
                     isGameSessionRunning = true,
                     showPauseMenuModal = false,
-                    showInventoryModal = false,
-                    gameLogs = emptyList()
+                    showSessionConsoleDrawer = true
                 )
             }
 
-            processLauncher.startGameProcessStream(
+            launcherCore.launchMinecraftJvmSession(
                 filesDir = appContext.filesDir,
+                minecraftRootDir = minecraftRootDir,
                 version = version,
-                runtimeConfig = _uiState.value.runtimeConfig,
+                runtimeConfig = _uiState.value.runtimeConfig.copy(selectedJava = requiredJava),
                 username = activeAccount.username,
                 uuid = activeAccount.uuid,
-                accessToken = activeAccount.accessToken
+                accessToken = activeAccount.accessToken,
+                renderSurface = activeRenderSurface
             ).collect { logLine ->
                 _uiState.update { cur ->
-                    val nextLogs = (cur.gameLogs + logLine).takeLast(120)
+                    val nextLogs = (cur.gameLogs + logLine).takeLast(200)
                     val diagnosis = aiEngine.analyzeLogOrCrash(
                         logText = nextLogs.joinToString("\n"),
                         targetVersion = version,
@@ -354,12 +432,46 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    /**
+     * Привязывает реальный Surface из TextureView к нативному мосту PojavNativeBridge (libpojavexec.so).
+     */
+    fun onTextureViewSurfaceReady(surface: Surface, width: Int, height: Int) {
+        activeRenderSurface = surface
+        PojavNativeBridge.dispatchWindowSurfaceSafely(surface)
+        PojavNativeBridge.dispatchWindowSizeSafely(width, height)
+        appendLogLine("[TextureView/Surface]: Surface готов (${width}x${height}) -> передан в PojavNativeBridge.")
+        _uiState.update {
+            it.copy(
+                surfaceWidth = width,
+                surfaceHeight = height,
+                isSurfaceBound = true
+            )
+        }
+    }
+
+    fun onTextureViewSurfaceSizeChanged(width: Int, height: Int) {
+        PojavNativeBridge.dispatchWindowSizeSafely(width, height)
+        _uiState.update {
+            it.copy(
+                surfaceWidth = width,
+                surfaceHeight = height
+            )
+        }
+    }
+
+    fun onTextureViewSurfaceDestroyed() {
+        activeRenderSurface = null
+        PojavNativeBridge.dispatchWindowSurfaceSafely(null)
+        _uiState.update { it.copy(isSurfaceBound = false) }
+    }
+
     fun getCurrentLaunchSpecPreview(): PojavLaunchSpec? {
         val state = _uiState.value
         val version = state.selectedVersion ?: return null
         val acc = state.accounts.firstOrNull { it.isActive } ?: state.accounts.firstOrNull()
-        return processLauncher.buildLaunchSpec(
+        return launcherCore.buildLaunchSpec(
             filesDir = appContext.filesDir,
+            minecraftRootDir = minecraftRootDir,
             version = version,
             runtimeConfig = state.runtimeConfig,
             username = acc?.username ?: "Steve",
@@ -376,33 +488,10 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(showSessionConsoleDrawer = !it.showSessionConsoleDrawer) }
     }
 
-    fun selectHotbarSlot(slotIndex: Int) {
-        _uiState.update { it.copy(selectedHotbarSlot = slotIndex.coerceIn(0, 8)) }
-    }
-
-    fun assignBlockToActiveHotbar(blockType: VoxelBlockType) {
-        _uiState.update { state ->
-            val mutable = state.hotbarBlocks.toMutableList()
-            mutable[state.selectedHotbarSlot] = blockType
-            state.copy(hotbarBlocks = mutable, showInventoryModal = false)
-        }
-    }
-
     fun togglePauseMenuModal(show: Boolean) {
         _uiState.update {
             it.copy(
                 showPauseMenuModal = show,
-                showInventoryModal = false,
-                isVirtualMouseEnabled = if (show) true else it.isVirtualMouseEnabled
-            )
-        }
-    }
-
-    fun toggleInventoryModal(show: Boolean) {
-        _uiState.update {
-            it.copy(
-                showInventoryModal = show,
-                showPauseMenuModal = false,
                 isVirtualMouseEnabled = if (show) true else it.isVirtualMouseEnabled
             )
         }
@@ -411,187 +500,106 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     fun toggleVirtualMouseCursor() {
         _uiState.update { state ->
             val next = !state.isVirtualMouseEnabled
-            state.copy(
-                isVirtualMouseEnabled = next,
-                targetedBlockInfo = if (next) "Курсор мыши: ВКЛ (свободный указатель)" else "Курсор мыши: ВЫКЛ (прицел камеры)"
-            )
+            state.copy(isVirtualMouseEnabled = next)
         }
     }
 
     fun onVirtualMouseDelta(dxNorm: Float, dyNorm: Float) {
-        val renderer = activeGlRenderer
-        val nextX = (_uiState.value.virtualMouseX + dxNorm * 1.15f).coerceIn(0.02f, 0.98f)
-        val nextY = (_uiState.value.virtualMouseY + dyNorm * 1.15f).coerceIn(0.02f, 0.98f)
-
-        var hoverText = _uiState.value.targetedBlockInfo
-        if (renderer != null) {
-            val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
-            val hit = voxelWorld.raycast(
-                renderer.playerX, eyeY, renderer.playerZ,
-                renderer.cameraYaw, renderer.cameraPitch,
-                cursorNormX = nextX, cursorNormY = nextY
-            )
-            if (hit != null) {
-                hoverText = "Курсор на: ${hit.blockType.displayName} (${hit.blockX}, ${hit.blockY}, ${hit.blockZ})"
-            }
-        }
-
+        val state = _uiState.value
+        val nextX = (state.virtualMouseX + dxNorm * 1.15f).coerceIn(0.0f, 1.0f)
+        val nextY = (state.virtualMouseY + dyNorm * 1.15f).coerceIn(0.0f, 1.0f)
+        PojavNativeBridge.dispatchCursorPosSafely(
+            nextX * state.surfaceWidth,
+            nextY * state.surfaceHeight
+        )
         _uiState.update {
             it.copy(
                 virtualMouseX = nextX,
-                virtualMouseY = nextY,
-                targetedBlockInfo = hoverText
+                virtualMouseY = nextY
             )
         }
     }
 
     fun onVirtualMouseClick() {
-        // When tapping the viewport in Virtual Mouse mode, break or interact with the block under the cursor
-        onGlfwKeyEvent(GlfwKeyBinding.MOUSE_BREAK, true)
+        PojavNativeBridge.dispatchMouseButtonSafely(0, true)
+        PojavNativeBridge.dispatchMouseButtonSafely(0, false)
+        _uiState.update {
+            it.copy(lastPressedGlfwKey = "GLFW_MOUSE_BUTTON_LEFT [CLICK]")
+        }
     }
 
-    // --- 3. Touch Controller & 3D Voxel Gameplay Interaction ---
+    // --- 3. Touch Controller & Нативная передача GLFW-кодов через JNI ---
 
     fun onGlfwKeyEvent(binding: GlfwKeyBinding, pressed: Boolean) {
-        val renderer = activeGlRenderer
-        val curState = _uiState.value
-        val rayX = if (curState.isVirtualMouseEnabled) curState.virtualMouseX else 0.5f
-        val rayY = if (curState.isVirtualMouseEnabled) curState.virtualMouseY else 0.5f
-
         if (pressed) {
             when (binding) {
                 GlfwKeyBinding.KEY_MOUSE_CURSOR -> {
                     toggleVirtualMouseCursor()
                 }
-                GlfwKeyBinding.KEY_JUMP -> {
-                    renderer?.triggerJump()
-                }
-                GlfwKeyBinding.KEY_SNEAK -> {
-                    val nextSneak = !(renderer?.isSneaking ?: false)
-                    renderer?.isSneaking = nextSneak
-                }
                 GlfwKeyBinding.MOUSE_BREAK -> {
-                    if (renderer != null) {
-                        val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
-                        val hit = voxelWorld.raycast(
-                            renderer.playerX, eyeY, renderer.playerZ,
-                            renderer.cameraYaw, renderer.cameraPitch,
-                            cursorNormX = rayX, cursorNormY = rayY
-                        )
-                        if (hit != null && hit.blockType != VoxelBlockType.BEDROCK) {
-                            voxelWorld.setBlock(hit.blockX, hit.blockY, hit.blockZ, VoxelBlockType.AIR)
-                            _uiState.update {
-                                it.copy(targetedBlockInfo = "Разрушен: ${hit.blockType.displayName} (${hit.blockX}, ${hit.blockY}, ${hit.blockZ})")
-                            }
-                        }
-                    }
+                    PojavNativeBridge.dispatchMouseButtonSafely(0, true)
                 }
                 GlfwKeyBinding.MOUSE_PLACE -> {
-                    if (renderer != null) {
-                        val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
-                        val hit = voxelWorld.raycast(
-                            renderer.playerX, eyeY, renderer.playerZ,
-                            renderer.cameraYaw, renderer.cameraPitch,
-                            cursorNormX = rayX, cursorNormY = rayY
-                        )
-                        if (hit != null) {
-                            val chosenBlock = _uiState.value.hotbarBlocks.getOrElse(_uiState.value.selectedHotbarSlot) {
-                                VoxelBlockType.COBBLESTONE
-                            }
-                            val pBlockX = kotlin.math.floor(renderer.playerX).toInt()
-                            val pBlockY = kotlin.math.floor(renderer.playerY).toInt()
-                            val pBlockZ = kotlin.math.floor(renderer.playerZ).toInt()
-                            val collidesWithPlayer = (hit.placeX == pBlockX && hit.placeZ == pBlockZ &&
-                                (hit.placeY == pBlockY || hit.placeY == pBlockY + 1))
-                            if (!collidesWithPlayer) {
-                                voxelWorld.setBlock(hit.placeX, hit.placeY, hit.placeZ, chosenBlock)
-                                _uiState.update {
-                                    it.copy(targetedBlockInfo = "Установлен: ${chosenBlock.displayName} (${hit.placeX}, ${hit.placeY}, ${hit.placeZ})")
-                                }
-                            }
-                        }
-                    }
-                }
-                GlfwKeyBinding.KEY_INVENTORY -> {
-                    val nextInv = !_uiState.value.showInventoryModal
-                    _uiState.update {
-                        it.copy(
-                            showInventoryModal = nextInv,
-                            showPauseMenuModal = false,
-                            isVirtualMouseEnabled = if (nextInv) true else it.isVirtualMouseEnabled
-                        )
-                    }
+                    PojavNativeBridge.dispatchMouseButtonSafely(1, true)
                 }
                 GlfwKeyBinding.KEY_PAUSE_ESC -> {
-                    val nextEsc = !_uiState.value.showPauseMenuModal
-                    _uiState.update {
-                        it.copy(
-                            showPauseMenuModal = nextEsc,
-                            showInventoryModal = false,
-                            isVirtualMouseEnabled = if (nextEsc) true else it.isVirtualMouseEnabled
-                        )
-                    }
-                }
-                GlfwKeyBinding.KEY_THIRD_PERSON_F5 -> {
-                    val nextF5 = !_uiState.value.isThirdPersonView
-                    renderer?.thirdPersonMode = nextF5
-                    _uiState.update { it.copy(isThirdPersonView = nextF5) }
+                    PojavNativeBridge.dispatchKeySafely(binding.glfwCode, true)
+                    _uiState.update { it.copy(showPauseMenuModal = !it.showPauseMenuModal) }
                 }
                 GlfwKeyBinding.KEY_DEBUG_F3 -> {
+                    PojavNativeBridge.dispatchKeySafely(binding.glfwCode, true)
                     _uiState.update { it.copy(showSessionDebugF3 = !it.showSessionDebugF3) }
                 }
                 GlfwKeyBinding.KEY_CHAT -> {
+                    PojavNativeBridge.dispatchKeySafely(binding.glfwCode, true)
                     _uiState.update { it.copy(showSessionConsoleDrawer = !it.showSessionConsoleDrawer) }
                 }
-                GlfwKeyBinding.KEY_PLAYER_LIST_TAB -> {
-                    renderer?.let { it.isNightTime = !it.isNightTime }
+                else -> {
+                    PojavNativeBridge.dispatchKeySafely(binding.glfwCode, true)
                 }
-                else -> {}
+            }
+        } else {
+            when (binding) {
+                GlfwKeyBinding.MOUSE_BREAK -> PojavNativeBridge.dispatchMouseButtonSafely(0, false)
+                GlfwKeyBinding.MOUSE_PLACE -> PojavNativeBridge.dispatchMouseButtonSafely(1, false)
+                GlfwKeyBinding.KEY_MOUSE_CURSOR -> {}
+                else -> PojavNativeBridge.dispatchKeySafely(binding.glfwCode, false)
             }
         }
 
         _uiState.update { state ->
             state.copy(
-                lastPressedGlfwKey = if (pressed) "${binding.keyName} [DOWN]" else "${binding.keyName} [UP]",
-                playerX = renderer?.playerX ?: state.playerX,
-                playerY = renderer?.playerY ?: state.playerY,
-                playerZ = renderer?.playerZ ?: state.playerZ
+                lastPressedGlfwKey = if (pressed) "${binding.keyName} [DOWN]" else "${binding.keyName} [UP]"
             )
         }
     }
 
     fun onAnalogMove(vx: Float, vy: Float) {
-        val renderer = activeGlRenderer
-        if (renderer != null) {
-            renderer.moveInputX = vx
-            renderer.moveInputY = vy
-        }
+        // Проброс осей WASD в нативный мост GLFW
+        PojavNativeBridge.dispatchKeySafely(87, vy > 0.35f)  // GLFW_KEY_W
+        PojavNativeBridge.dispatchKeySafely(83, vy < -0.35f) // GLFW_KEY_S
+        PojavNativeBridge.dispatchKeySafely(65, vx < -0.35f) // GLFW_KEY_A
+        PojavNativeBridge.dispatchKeySafely(68, vx > 0.35f)  // GLFW_KEY_D
         _uiState.update {
             it.copy(
                 analogVectorX = vx,
-                analogVectorY = vy,
-                playerX = renderer?.playerX ?: it.playerX,
-                playerY = renderer?.playerY ?: it.playerY,
-                playerZ = renderer?.playerZ ?: it.playerZ
+                analogVectorY = vy
             )
         }
     }
 
     fun onCameraLookDelta(dx: Float, dy: Float) {
-        val renderer = activeGlRenderer
-        val nextYaw = ((_uiState.value.cameraYaw + dx * 0.28f) % 360f + 360f) % 360f
-        val nextPitch = (_uiState.value.cameraPitch - dy * 0.22f).coerceIn(-85f, 85f)
-        if (renderer != null) {
-            renderer.cameraYaw = nextYaw
-            renderer.cameraPitch = nextPitch
-        }
+        val state = _uiState.value
+        val nextYaw = (state.cameraYaw + dx * 0.35f) % 360f
+        val nextPitch = (state.cameraPitch - dy * 0.35f).coerceIn(-90f, 90f)
+        PojavNativeBridge.dispatchCursorPosSafely(
+            state.surfaceWidth / 2f + dx,
+            state.surfaceHeight / 2f + dy
+        )
         _uiState.update {
             it.copy(
                 cameraYaw = nextYaw,
-                cameraPitch = nextPitch,
-                playerX = renderer?.playerX ?: it.playerX,
-                playerY = renderer?.playerY ?: it.playerY,
-                playerZ = renderer?.playerZ ?: it.playerZ
+                cameraPitch = nextPitch
             )
         }
     }
@@ -818,7 +826,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         val state = _uiState.value
         val activeUser = state.accounts.firstOrNull { it.isActive }?.username ?: "monolith_skin"
         val file = skinClient.exportSkinToPng(
-            filesDir = appContext.filesDir,
+            filesDir = minecraftRootDir,
             fileName = "${activeUser}_${state.skinFormat.width}x${state.skinFormat.height}.png",
             pixels = state.skinPixels,
             format = state.skinFormat
@@ -891,42 +899,25 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
 
     fun getMicrosoftAuthorizeUrl(): String = authManager.buildMicrosoftOAuthUrl()
 
-    // --- 6. AI Crash Analyzer, Hardware Tuner & Runtime Config ---
+    // --- 6. AI Crash Analyzer (чтение реального latest.log), Hardware Tuner & Runtime Config ---
 
-    fun simulateCrashScenarioInLog(scenarioType: String) {
+    fun analyzeLatestLogFileFromDisk() {
         val ver = _uiState.value.selectedVersion ?: return
-        val simulatedLines = when (scenarioType) {
-            "JAVA_VERSION" -> listOf(
-                "[12:04:11] [PojavCore/INFO]: Launching ${ver.id} with manual JRE 8 override...",
-                "[12:04:12] [main/FATAL]: Exception in thread \"main\" java.lang.UnsupportedClassVersionError: net/minecraft/client/main/Main has been compiled by a more recent version of the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 52.0",
-                "[12:04:12] [PojavCore/ERROR]: Process exited with code 1"
-            )
-            "HEAP_OOM" -> listOf(
-                "[12:05:30] [Render thread/WARN]: Memory allocation spike during world chunk meshing",
-                "[12:05:31] [Server thread/FATAL]: java.lang.OutOfMemoryError: Java heap space (allocated -Xmx${_uiState.value.runtimeConfig.allocatedMemoryMb}M)",
-                "[12:05:31] [PojavCore/ERROR]: Crash report saved to crash-reports/crash-oom-client.txt"
-            )
-            "GL_SHADER" -> listOf(
-                "[12:06:15] [Render thread/INFO]: Compiling core shader rendertype_entity_cutout...",
-                "[12:06:16] [Render thread/ERROR]: GL4ES Shader compilation failed: glCompileShader error 0x502 (EGL_BAD_CONFIG)",
-                "[12:06:16] [main/FATAL]: GLFW_PLATFORM_ERROR: Failed to link OpenGL program on mobile GPU"
-            )
-            else -> listOf(
-                "[12:07:02] [DownloadEngine/ERROR]: java.util.zip.ZipException: invalid CEN header (SHA-1 mismatch on client.jar)",
-                "[12:07:02] [main/FATAL]: java.lang.ClassNotFoundException: net.minecraft.client.main.Main"
-            )
+        val latestLogFile = File(minecraftRootDir, "logs/latest.log")
+        val logContent = if (latestLogFile.exists() && latestLogFile.length() > 0L) {
+            latestLogFile.readText()
+        } else {
+            _uiState.value.gameLogs.joinToString("\n")
         }
 
-        val combinedText = simulatedLines.joinToString("\n")
         val localDiag = aiEngine.analyzeLogOrCrash(
-            logText = combinedText,
+            logText = logContent,
             targetVersion = ver,
             currentConfig = _uiState.value.runtimeConfig
         )
 
         _uiState.update {
             it.copy(
-                gameLogs = simulatedLines,
                 crashDiagnosis = localDiag,
                 isAiAnalyzing = true
             )
@@ -934,7 +925,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
 
         viewModelScope.launch {
             val geminiNote = geminiAssistant.enrichCrashAnalysisWithGemini(
-                logSnippet = combinedText,
+                logSnippet = logContent.takeLast(3000),
                 versionId = ver.id,
                 javaTitle = _uiState.value.runtimeConfig.selectedJava.title
             )
@@ -967,12 +958,12 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             }
 
             val fixedLogs = state.gameLogs + listOf(
-                "[AI-AutoFix/SUCCESS]: Применено исправление: ${diag.fixAction.buttonLabel}",
-                "[PojavCore/INFO]: Конфигурация JVM синхронизирована для ${ver.id}. Готово к запуску."
+                "[AI-AutoFix]: Применено исправление: ${diag.fixAction.buttonLabel}",
+                "[MinecraftLauncherCore]: Конфигурация JVM обновлена для ${ver.id}."
             )
 
             val healthyDiag = aiEngine.analyzeLogOrCrash(
-                logText = "[PojavCore/INFO]: Ready.",
+                logText = fixedLogs.joinToString("\n"),
                 targetVersion = ver,
                 currentConfig = updatedRuntime
             )

@@ -658,43 +658,21 @@ fun AiEngineerLandscapeScreen(
                     )
                 }
 
-                // Simulated Crash Triggers for testing 1-Click Remediation
+                // Real latest.log Disk Reader & Analyzer
                 Text(
-                    text = "Протестировать парсер на типовых сбоях latest.log:",
+                    text = "Анализ реального лога сессии (logs/latest.log) и буфера консоли:",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp
                 )
-                Row(
+                OutlinedButton(
+                    onClick = { viewModel.analyzeLatestLogFileFromDisk() },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .height(36.dp)
+                        .testTag("analyze_real_latest_log_button")
                 ) {
-                    OutlinedButton(
-                        onClick = { viewModel.simulateCrashScenarioInLog("JAVA_VERSION") },
-                        modifier = Modifier
-                            .height(32.dp)
-                            .testTag("simulate_java_crash_button")
-                    ) {
-                        Text("ClassFile 65.0 (Java)", fontSize = 11.sp)
-                    }
-                    OutlinedButton(
-                        onClick = { viewModel.simulateCrashScenarioInLog("HEAP_OOM") },
-                        modifier = Modifier
-                            .height(32.dp)
-                            .testTag("simulate_oom_crash_button")
-                    ) {
-                        Text("OutOfMemoryError", fontSize = 11.sp)
-                    }
-                    OutlinedButton(
-                        onClick = { viewModel.simulateCrashScenarioInLog("GL_SHADER") },
-                        modifier = Modifier
-                            .height(32.dp)
-                            .testTag("simulate_gl_crash_button")
-                    ) {
-                        Text("GL4ES Shader Fault", fontSize = 11.sp)
-                    }
+                    Text("Просканировать logs/latest.log с диска", fontSize = 12.sp)
                 }
 
                 if (diag != null) {

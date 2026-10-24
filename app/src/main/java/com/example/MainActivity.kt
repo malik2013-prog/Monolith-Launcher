@@ -97,13 +97,7 @@ fun MonolithLandscapeAppShell(
     // and render the standalone full-screen 3D OpenGL ES game window.
     if (state.currentDestination == LauncherDestination.GAME_SESSION) {
         BackHandler {
-            if (state.showInventoryModal) {
-                viewModel.toggleInventoryModal(false)
-            } else if (state.showPauseMenuModal) {
-                viewModel.togglePauseMenuModal(false)
-            } else {
-                viewModel.togglePauseMenuModal(true)
-            }
+            viewModel.togglePauseMenuModal(!state.showPauseMenuModal)
         }
         Box(
             modifier = Modifier

@@ -1,6 +1,8 @@
 package com.example.ui
 
-import android.opengl.GLSurfaceView
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.TextureView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -40,11 +42,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Surface as M3Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -53,7 +54,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -66,8 +66,6 @@ import com.example.LauncherUiState
 import com.example.LauncherViewModel
 import com.example.R
 import com.example.controller.TouchControllerOverlay
-import com.example.engine.MinecraftVoxelGlRenderer
-import com.example.engine.VoxelBlockType
 import com.example.pojavruntime.MinecraftVersion
 import com.example.pojavruntime.VanillaEra
 import com.example.ui.theme.EmeraldPrimary
@@ -95,10 +93,10 @@ fun PlayHubLandscapeScreen(
             .padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Left Column (54% width): Header + Splash Quote + Era Filter + Mojang Manifest V2 List
-        Surface(
+        // Left Column (52% width): Header + Splash Quote + Era Filter + Real Mojang Manifest V2 List
+        M3Surface(
             modifier = Modifier
-                .weight(0.54f)
+                .weight(0.52f)
                 .fillMaxHeight(),
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(14.dp),
@@ -149,7 +147,7 @@ fun PlayHubLandscapeScreen(
                 OutlinedTextField(
                     value = state.versionSearchQuery,
                     onValueChange = { viewModel.updateVersionSearchQuery(it) },
-                    placeholder = { Text("Поиск Vanilla версии (напр. 1.21.4, 1.16.5, b1.7.3, a1.2.6)...", fontSize = 12.sp) },
+                    placeholder = { Text("Поиск Vanilla версии из piston-meta.mojang.com...", fontSize = 12.sp) },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -158,43 +156,55 @@ fun PlayHubLandscapeScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .testTag("vanilla_version_list"),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    items(filteredVersions, key = { it.id }) { version ->
-                        VersionListRowItem(
-                            version = version,
-                            isSelected = state.selectedVersion?.id == version.id,
-                            onClick = { viewModel.selectVersion(version) }
-                        )
+                if (state.isFetchingManifest && state.versions.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            LinearProgressIndicator(color = EmeraldPrimary)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Загрузка официального манифеста Mojang (version_manifest_v2.json)...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .testTag("vanilla_version_list"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(filteredVersions, key = { it.id }) { version ->
+                            VersionListRowItem(
+                                version = version,
+                                isSelected = state.selectedVersion?.id == version.id,
+                                onClick = { viewModel.selectVersion(version) }
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Right Column (46% width): Selected Version Spec + Real Mojang Downloader + Launch Action
-        Surface(
+        // Right Column (48% width): Selected Version Spec + Real Mojang Downloader + Live Console + Launch Button
+        M3Surface(
             modifier = Modifier
-                .weight(0.46f)
+                .weight(0.48f)
                 .fillMaxHeight(),
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(14.dp),
             tonalElevation = 2.dp
         ) {
             val selected = state.selectedVersion
-            val activeAccount = state.accounts.firstOrNull { it.isActive } ?: state.accounts.firstOrNull()
-            val effectiveJava = if (state.runtimeConfig.autoSelectJava) {
-                selected?.recommendedJava ?: state.runtimeConfig.selectedJava
-            } else {
-                state.runtimeConfig.selectedJava
-            }
-            val jarExists = remember(selected?.id, state.prepareProgress) {
-                viewModel.getDownloadedClientJarFile()?.let { it.exists() && it.length() > 100_000L } == true
-            }
+            val comp = state.mojangComponentsStatus
+            val jarExists = comp.clientJarInstalled
 
             Column(
                 modifier = Modifier
@@ -207,7 +217,7 @@ fun PlayHubLandscapeScreen(
                     modifier = Modifier
                         .weight(1f)
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -216,12 +226,12 @@ fun PlayHubLandscapeScreen(
                     ) {
                         Column {
                             Text(
-                                text = "КОНФИГУРАЦИЯ ЗАПУСКА MOJANG",
+                                text = "MOJANG DOWNLOADER & OPENJDK ARM64",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = EmeraldPrimary
                             )
                             Text(
-                                text = selected?.let { "Minecraft ${it.id}" } ?: "Выберите версию",
+                                text = selected?.let { "Minecraft ${it.id}" } ?: "Загрузка манифеста...",
                                 style = MaterialTheme.typography.headlineMedium
                             )
                         }
@@ -231,13 +241,6 @@ fun PlayHubLandscapeScreen(
                     }
 
                     if (selected != null) {
-                        Text(
-                            text = selected.summary,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        val comp = state.mojangComponentsStatus
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -245,30 +248,25 @@ fun PlayHubLandscapeScreen(
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
                                 .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(5.dp)
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            TechSpecRow("Среда OpenJDK", effectiveJava.title)
-                            TechSpecRow("Рендерер GPU", state.runtimeConfig.renderer.title)
-                            TechSpecRow("Пул памяти JVM", "-Xmx${state.runtimeConfig.allocatedMemoryMb}M (${state.runtimeConfig.gcAlgorithm.title})")
                             TechSpecRow(
-                                "Клиент Mojang client.jar",
+                                "OpenJDK Runtime (aarch64)",
+                                "Java ${comp.resolvedJavaMajor} (${if (comp.jreInstalled) "Установлен в files/runtimes/jre_${comp.resolvedJavaMajor}" else "Скачается автоматически"})"
+                            )
+                            TechSpecRow("Графический мост", state.runtimeConfig.renderer.title)
+                            TechSpecRow("Пул памяти JVM", "-Xmx${state.runtimeConfig.allocatedMemoryMb}M (${state.runtimeConfig.gcAlgorithm.name})")
+                            TechSpecRow(
+                                "Клиент versions/${selected.id}.jar",
                                 if (comp.clientJarInstalled || jarExists) {
-                                    "Установлен (${"%.1f".format(comp.clientJarSizeMb.coerceAtLeast(15.0f))} МБ)"
+                                    "Проверен SHA-1 (${"%.1f".format(comp.clientJarSizeMb)} МБ)"
                                 } else {
-                                    "Готов к скачиванию (piston-data.mojang.com)"
+                                    "Не скачан (piston-data.mojang.com)"
                                 }
                             )
                             TechSpecRow(
-                                "Библиотеки и Ассеты Mojang",
-                                if (comp.mojangLibrariesInstalledCount > 0 || comp.assetIndexInstalled) {
-                                    "JAR: ${comp.mojangLibrariesInstalledCount} шт. • Objects: ${comp.assetObjectsInstalledCount} шт."
-                                } else {
-                                    "Установятся автоматически"
-                                }
-                            )
-                            TechSpecRow(
-                                "Профиль и options.txt",
-                                "${activeAccount?.username ?: "Steve"} (${if (comp.profilesAndOptionsReady) "Готово" else "Создастся"})"
+                                "Maven libraries/ & assets/objects/",
+                                "JAR: ${comp.mojangLibrariesInstalledCount} шт. • Objects: ${comp.assetObjectsInstalledCount} шт."
                             )
                         }
 
@@ -284,7 +282,7 @@ fun PlayHubLandscapeScreen(
                                     .testTag("install_mojang_components_button")
                             ) {
                                 Text(
-                                    text = if (comp.isFullyReady) "Проверить файлы Mojang" else "Установить файлы Mojang",
+                                    text = if (comp.isFullyReady) "Перепроверить SHA-1 файлов" else "Скачать файлы и JRE без запуска",
                                     fontSize = 11.sp,
                                     maxLines = 1
                                 )
@@ -305,6 +303,40 @@ fun PlayHubLandscapeScreen(
                                 Text("Мышь / Тач", fontSize = 11.sp, maxLines = 1)
                             }
                         }
+
+                        // Real-time Console Log Box inside PlayHub
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(110.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF0A0E12))
+                                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            Text(
+                                text = "КОНСОЛЬ MOJANG DOWNLOADER & JRE (latest.log)",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EmeraldPrimary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                items(state.gameLogs.takeLast(35)) { logLine ->
+                                    Text(
+                                        text = logLine,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontSize = 9.sp,
+                                        color = if (logLine.contains("ERROR") || logLine.contains("FATAL")) {
+                                            Color(0xFFF05454)
+                                        } else {
+                                            Color(0xFFD0D8E0)
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -312,8 +344,8 @@ fun PlayHubLandscapeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    AnimatedVisibility(visible = state.prepareProgress != null) {
-                        val prog = state.prepareProgress
+                    val prog = state.prepareProgress
+                    AnimatedVisibility(visible = prog != null) {
                         if (prog != null) {
                             Column(
                                 modifier = Modifier
@@ -322,22 +354,37 @@ fun PlayHubLandscapeScreen(
                                     .background(MaterialTheme.colorScheme.surfaceVariant)
                                     .padding(8.dp)
                             ) {
-                                Text(
-                                    text = prog.stageTitle,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = EmeraldPrimary
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = prog.stageTitle,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = EmeraldPrimary
+                                    )
+                                    Text(
+                                        text = "${"%.1f".format(prog.downloadedMb)} / ${"%.1f".format(prog.totalMb)} МБ (${prog.percentage}%)",
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontSize = 11.sp,
+                                        color = SplashGold,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 LinearProgressIndicator(
                                     progress = { prog.progressFraction },
                                     modifier = Modifier.fillMaxWidth(),
                                     color = EmeraldPrimary
                                 )
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = prog.currentFile,
-                                    style = MaterialTheme.typography.labelMedium,
+                                    text = "Файл: ${prog.currentFile}",
+                                    fontFamily = JetBrainsMonoFontFamily,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 10.sp
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -345,7 +392,7 @@ fun PlayHubLandscapeScreen(
 
                     Button(
                         onClick = { viewModel.launchSelectedVanillaVersion() },
-                        enabled = state.prepareProgress == null && selected != null,
+                        enabled = prog == null && selected != null,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp)
@@ -362,14 +409,23 @@ fun PlayHubLandscapeScreen(
                             modifier = Modifier.size(22.dp)
                         )
                         Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = if (jarExists) {
-                                "ИГРАТЬ В MINECRAFT ${selected?.id.orEmpty()}"
-                            } else {
+                        val buttonLabel = when {
+                            prog != null -> {
+                                "${prog.currentFile} • ${"%.1f".format(prog.downloadedMb)}/${"%.1f".format(prog.totalMb)} МБ (${prog.percentage}%)"
+                            }
+                            comp.isFullyReady -> {
+                                "ЗАПУСТИТЬ MINECRAFT ${selected?.id.orEmpty()} (JVM ARM64)"
+                            }
+                            else -> {
                                 "СКАЧАТЬ И ЗАПУСТИТЬ ${selected?.id.orEmpty()}"
-                            },
+                            }
+                        }
+                        Text(
+                            text = buttonLabel,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -431,7 +487,7 @@ private fun SplashBrandHeader(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "POJAV CORE",
+                        text = "ARM64 JRE",
                         style = MaterialTheme.typography.labelMedium,
                         color = EmeraldPrimary,
                         modifier = Modifier
@@ -580,8 +636,8 @@ fun TechSpecRow(label: String, value: String) {
 }
 
 /**
- * Полноэкранный автономный режим игры Minecraft Java 3D (OpenGL ES 2.0 + текстуры из скачанного Mojang client.jar).
- * Лаунчер полностью скрывается, запуская настоящую 3D воксельную сцену с физикой, разрушением/установкой блоков и хотбаром.
+ * Экран нативного вывода Minecraft: Java Edition (ARM64) через Android TextureView + JNI Surface Bridge,
+ * поверх которого рисуется кастомизируемый TouchControllerOverlay и виртуальный курсор мыши.
  */
 @Composable
 fun GameSessionLandscapeScreen(
@@ -589,27 +645,9 @@ fun GameSessionLandscapeScreen(
     viewModel: LauncherViewModel,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     val selectedVersion = state.selectedVersion
-    val clientJar = remember(selectedVersion?.id) { viewModel.getDownloadedClientJarFile() }
-
-    val glRenderer = remember(selectedVersion?.id) {
-        MinecraftVoxelGlRenderer(
-            world = viewModel.voxelWorld,
-            clientJarFile = clientJar,
-            onTextureSourceResolved = { fromMojang ->
-                viewModel.notifyMojangTextureSourceResolved(fromMojang)
-            }
-        )
-    }
-
-    DisposableEffect(glRenderer) {
-        viewModel.activeGlRenderer = glRenderer
-        onDispose {
-            if (viewModel.activeGlRenderer === glRenderer) {
-                viewModel.activeGlRenderer = null
-            }
-        }
+    val spec = remember(selectedVersion?.id, state.runtimeConfig) {
+        viewModel.getCurrentLaunchSpecPreview()
     }
 
     Box(
@@ -618,19 +656,50 @@ fun GameSessionLandscapeScreen(
             .background(Color.Black)
             .testTag("game_session_screen")
     ) {
-        // 1. Hardware-Accelerated 3D OpenGL ES 2.0 Voxel World View
+        // 1. Real Android TextureView passing Surface to PojavNativeBridge (libpojavexec.so / GLFW / ANGLE / GL4ES)
         AndroidView(
             factory = { ctx ->
-                GLSurfaceView(ctx).apply {
-                    setEGLContextClientVersion(2)
-                    setRenderer(glRenderer)
-                    renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                TextureView(ctx).apply {
+                    isOpaque = true
+                    keepScreenOn = true
+                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        private var activeSurface: Surface? = null
+
+                        override fun onSurfaceTextureAvailable(
+                            surfaceTexture: SurfaceTexture,
+                            width: Int,
+                            height: Int
+                        ) {
+                            val surface = Surface(surfaceTexture)
+                            activeSurface = surface
+                            viewModel.onTextureViewSurfaceReady(surface, width, height)
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(
+                            surfaceTexture: SurfaceTexture,
+                            width: Int,
+                            height: Int
+                        ) {
+                            viewModel.onTextureViewSurfaceSizeChanged(width, height)
+                        }
+
+                        override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                            viewModel.onTextureViewSurfaceDestroyed()
+                            activeSurface?.release()
+                            activeSurface = null
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
+                    }
                 }
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("minecraft_native_texture_view")
         )
 
-        // 2. Center Crosshair (+) when camera lock is active
+        // 2. Center Crosshair (+) when Virtual Mouse is off
         if (!state.isVirtualMouseEnabled) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val cx = size.width / 2f
@@ -640,7 +709,7 @@ fun GameSessionLandscapeScreen(
             }
         }
 
-        // 3. Touch Controller Overlay (WASD Stick + Virtual Mouse Cursor (MOUSE) + Camera Look + Break/Place/Jump/Sneak/Inv/F3/F5/Esc)
+        // 3. Touch Controller Overlay (WASD Stick + Virtual Mouse Cursor (MOUSE) + GLFW Key Dispatch)
         TouchControllerOverlay(
             nodes = state.controllerNodes,
             isEditMode = false,
@@ -658,71 +727,7 @@ fun GameSessionLandscapeScreen(
             onVirtualMouseClick = { viewModel.onVirtualMouseClick() }
         )
 
-        // 4. Authentic 9-Slot Minecraft Hotbar at Bottom Center
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            val activeBlock = state.hotbarBlocks.getOrElse(state.selectedHotbarSlot) { VoxelBlockType.GRASS }
-            Text(
-                text = "${activeBlock.displayName}  •  ${state.targetedBlockInfo}",
-                fontFamily = JetBrainsMonoFontFamily,
-                fontSize = 11.sp,
-                color = Color.White,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0x99000000))
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xCC181818))
-                    .border(2.dp, Color(0xFF8B8B8B), RoundedCornerShape(6.dp))
-                    .padding(3.dp),
-                horizontalArrangement = Arrangement.spacedBy(3.dp)
-            ) {
-                state.hotbarBlocks.forEachIndexed { index, block ->
-                    val isSelected = index == state.selectedHotbarSlot
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(if (isSelected) Color(0xFF424242) else Color(0xFF262626))
-                            .border(
-                                width = if (isSelected) 2.5.dp else 1.dp,
-                                color = if (isSelected) Color.White else Color(0xFF555555),
-                                shape = RoundedCornerShape(4.dp)
-                            )
-                            .clickable { viewModel.selectHotbarSlot(index) }
-                            .testTag("hotbar_slot_$index"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(Color(block.previewColor))
-                                .border(1.dp, Color(0x88000000), RoundedCornerShape(3.dp))
-                        )
-                        Text(
-                            text = "${index + 1}",
-                            fontFamily = JetBrainsMonoFontFamily,
-                            fontSize = 9.sp,
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(start = 3.dp, top = 1.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        // 5. F3 Debug HUD (positioned below top bar so it NEVER overlaps ESC / TAB / CHAT / F3 / F5)
+        // 4. F3 Native JVM & Surface Status HUD (positioned below top bar)
         AnimatedVisibility(
             visible = state.showSessionDebugF3,
             modifier = Modifier
@@ -732,30 +737,32 @@ fun GameSessionLandscapeScreen(
             Column(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xBB0B0F14))
-                    .padding(8.dp)
+                    .background(Color(0xCC0B0F14))
+                    .border(1.dp, EmeraldPrimary.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
-                    text = "Minecraft ${selectedVersion?.id ?: "1.21.4"} (${selectedVersion?.mainClass ?: "Vanilla"} / OpenGL ES 2.0)",
+                    text = "Minecraft ${selectedVersion?.id ?: "Vanilla"} • MainClass: ${spec?.mainClass ?: "net.minecraft.client.main.Main"}",
                     fontFamily = JetBrainsMonoFontFamily,
                     color = EmeraldPrimary,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Textures: ${if (state.loadedMojangJarTextures) "Mojang Official client.jar (Verified)" else "Built-in Vanilla 16x16 Atlas"}",
+                    text = "Surface: TextureView (${state.surfaceWidth}x${state.surfaceHeight}, Bound=${state.isSurfaceBound}) • Session Running: ${state.isGameSessionRunning}",
                     fontFamily = JetBrainsMonoFontFamily,
                     color = SplashGold,
                     fontSize = 10.sp
                 )
                 Text(
-                    text = "XYZ: ${"%.1f".format(state.playerX)} / ${"%.1f".format(state.playerY)} / ${"%.1f".format(state.playerZ)}  •  Yaw/Pitch: ${state.cameraYaw.roundToInt()}° / ${state.cameraPitch.roundToInt()}°",
+                    text = "OpenJDK: ${spec?.jreHomeDir ?: "runtimes/jre"} • Classpath JARs: ${spec?.classpathEntries?.size ?: 0}",
                     fontFamily = JetBrainsMonoFontFamily,
                     color = Color.White,
                     fontSize = 10.sp
                 )
                 Text(
-                    text = "JVM Heap: -Xmx${state.runtimeConfig.allocatedMemoryMb}M (${state.runtimeConfig.renderer.title}) • Camera: ${if (state.isThirdPersonView) "3rd Person (F5)" else "1st Person"}",
+                    text = "JVM Heap: -Xmx${state.runtimeConfig.allocatedMemoryMb}M (${state.runtimeConfig.renderer.title}) • Last GLFW Key: ${state.lastPressedGlfwKey}",
                     fontFamily = JetBrainsMonoFontFamily,
                     color = Color(0xFFB0BEC5),
                     fontSize = 10.sp
@@ -763,7 +770,7 @@ fun GameSessionLandscapeScreen(
             }
         }
 
-        // 6. Top-Right Quick Mouse Cursor, Console & Menu Buttons
+        // 5. Top-Right Quick Mouse Cursor, Console & Menu Buttons
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -799,7 +806,7 @@ fun GameSessionLandscapeScreen(
                     .height(32.dp)
                     .testTag("toggle_console_drawer_button")
             ) {
-                Text("Лог", fontSize = 11.sp, color = Color.White)
+                Text("Консоль JVM", fontSize = 11.sp, color = Color.White)
             }
             Button(
                 onClick = { viewModel.togglePauseMenuModal(true) },
@@ -815,69 +822,7 @@ fun GameSessionLandscapeScreen(
             }
         }
 
-        // 7. Block Inventory Modal (INV / E)
-        AnimatedVisibility(
-            visible = state.showInventoryModal,
-            modifier = Modifier.align(Alignment.Center)
-        ) {
-            Column(
-                modifier = Modifier
-                    .width(420.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xEE181E24))
-                    .border(2.dp, Color(0xFF8B8B8B), RoundedCornerShape(12.dp))
-                    .padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    text = "ИНВЕНТАРЬ БЛОКОВ VANILLA (Слот #${state.selectedHotbarSlot + 1})",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    fontSize = 13.sp
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    VoxelBlockType.entries.filter { it != VoxelBlockType.AIR }.forEach { blk ->
-                        Column(
-                            modifier = Modifier
-                                .width(76.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF262F38))
-                                .border(1.dp, EmeraldPrimary.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                                .clickable { viewModel.assignBlockToActiveHotbar(blk) }
-                                .padding(8.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(30.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Color(blk.previewColor))
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = blk.displayName,
-                                fontSize = 10.sp,
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                }
-                OutlinedButton(onClick = { viewModel.toggleInventoryModal(false) }) {
-                    Text("Закрыть инвентарь (E)", color = Color.White)
-                }
-            }
-        }
-
-        // 8. Authentic Minecraft Java Pause Menu Modal (ESC)
+        // 6. Pause Menu Modal (ESC)
         AnimatedVisibility(
             visible = state.showPauseMenuModal,
             modifier = Modifier.align(Alignment.Center)
@@ -893,7 +838,7 @@ fun GameSessionLandscapeScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "Game Menu — Minecraft ${selectedVersion?.id ?: "Vanilla"}",
+                    text = "Меню сессии — Minecraft ${selectedVersion?.id ?: "Vanilla"}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -906,16 +851,7 @@ fun GameSessionLandscapeScreen(
                         contentColor = Color(0xFF041A0C)
                     )
                 ) {
-                    Text("Back to Game (Вернуться к игре)", fontWeight = FontWeight.Bold)
-                }
-                OutlinedButton(
-                    onClick = {
-                        viewModel.voxelWorld.generateVanillaTerrain()
-                        viewModel.togglePauseMenuModal(false)
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Пересоздать чанки мира (New Seed)", color = Color.White, fontSize = 12.sp)
+                    Text("Вернуться к окну игры (Resume)", fontWeight = FontWeight.Bold)
                 }
                 OutlinedButton(
                     onClick = { viewModel.exitFullscreenGameToLauncher() },
@@ -923,18 +859,18 @@ fun GameSessionLandscapeScreen(
                         .fillMaxWidth()
                         .testTag("quit_to_launcher_button")
                 ) {
-                    Text("Save & Quit to Launcher (Выйти в лаунчер)", color = SplashGold, fontSize = 12.sp)
+                    Text("Завершить JVM и выйти в лаунчер", color = SplashGold, fontSize = 12.sp)
                 }
             }
         }
 
-        // 9. Collapsible Live Console Log Drawer
+        // 7. Collapsible Live Console Log Drawer (stdout/stderr from JVM & JNI)
         AnimatedVisibility(
             visible = state.showSessionConsoleDrawer,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .height(150.dp)
+                .height(175.dp)
                 .padding(horizontal = 24.dp, vertical = 42.dp)
         ) {
             Column(
@@ -951,14 +887,14 @@ fun GameSessionLandscapeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "POJAV PROCESS CONSOLE (latest.log)",
+                        text = "POJAV JVM / JNI CONSOLE (latest.log)",
                         fontFamily = JetBrainsMonoFontFamily,
                         color = EmeraldPrimary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "[Закрыть]",
+                        text = "[Свернуть]",
                         color = Color.White,
                         fontSize = 11.sp,
                         fontFamily = JetBrainsMonoFontFamily,
@@ -974,7 +910,7 @@ fun GameSessionLandscapeScreen(
                             text = line,
                             fontFamily = JetBrainsMonoFontFamily,
                             fontSize = 10.sp,
-                            color = if (line.contains("FATAL") || line.contains("ERROR")) {
+                            color = if (line.contains("FATAL") || line.contains("ERROR") || line.contains("Exception")) {
                                 Color(0xFFF05454)
                             } else {
                                 Color(0xFFD0D8E0)
@@ -1048,7 +984,7 @@ fun TouchControllerStudioScreen(
             )
         }
 
-        Surface(
+        M3Surface(
             modifier = Modifier
                 .weight(0.36f)
                 .fillMaxHeight(),

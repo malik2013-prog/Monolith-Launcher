@@ -3,8 +3,8 @@ package com.example.pojavruntime
 enum class VanillaEra(val displayName: String, val badgeCode: String) {
     RELEASE("Releases", "REL"),
     SNAPSHOT("Snapshots", "SNAP"),
-    BETA("Beta", "BETA"),
-    ALPHA("Alpha", "ALPHA"),
+    BETA("Old Beta", "BETA"),
+    ALPHA("Old Alpha", "ALPHA"),
     INFDEV("Infdev", "INFD"),
     CLASSIC("Classic", "CLAS"),
     PRE_CLASSIC("Pre-Classic", "PRE")
@@ -18,21 +18,21 @@ enum class JavaRuntimeMajor(
 ) {
     JRE_8(
         major = 8,
-        title = "OpenJDK 8u412 (ARM64)",
-        folderName = "jre8-arm64",
-        description = "Для Pre-Classic, Classic, Alpha, Beta и релизов до 1.16.5 (LWJGL 2/3)"
+        title = "OpenJDK 8 (aarch64)",
+        folderName = "jre_8",
+        description = "Для версий Minecraft до 1.16.5 (javaVersion.majorVersion = 8)"
     ),
     JRE_17(
         major = 17,
-        title = "OpenJDK 17.0.11 (ARM64)",
-        folderName = "jre17-arm64",
-        description = "Для Minecraft 1.17 – 1.20.4 (Class File 61.0, G1GC Tuned)"
+        title = "OpenJDK 17 (aarch64)",
+        folderName = "jre_17",
+        description = "Для Minecraft 1.17 – 1.20.4 (javaVersion.majorVersion = 17)"
     ),
     JRE_21(
         major = 21,
-        title = "OpenJDK 21.0.4 (ARM64)",
-        folderName = "jre21-arm64",
-        description = "Для Minecraft 1.20.5+ и актуальных снапшотов (Class File 65.0, Generational ZGC)"
+        title = "OpenJDK 21 (aarch64)",
+        folderName = "jre_21",
+        description = "Для Minecraft 1.20.5+ и снапшотов (javaVersion.majorVersion = 21)"
     );
 
     companion object {
@@ -92,6 +92,33 @@ data class MinecraftVersion(
     val summary: String,
     val isVerifiedLocal: Boolean = false
 )
+
+data class AssetPrepareProgress(
+    val stageTitle: String,
+    val progressFraction: Float,
+    val currentFile: String,
+    val downloadedMb: Float = 0f,
+    val totalMb: Float = 0f,
+    val percentage: Int = (progressFraction * 100).toInt().coerceIn(0, 100),
+    val sha1Verified: Boolean = false,
+    val completed: Boolean = false
+)
+
+data class MojangComponentsStatus(
+    val versionId: String = "",
+    val versionJsonInstalled: Boolean = false,
+    val clientJarInstalled: Boolean = false,
+    val clientJarSizeMb: Float = 0f,
+    val assetIndexInstalled: Boolean = false,
+    val assetObjectsInstalledCount: Int = 0,
+    val mojangLibrariesInstalledCount: Int = 0,
+    val jreInstalled: Boolean = false,
+    val resolvedJavaMajor: Int = 21
+) {
+    val isFullyReady: Boolean
+        get() = versionJsonInstalled && clientJarInstalled && assetIndexInstalled &&
+            mojangLibrariesInstalledCount > 0
+}
 
 data class JvmRuntimeConfig(
     val autoSelectJava: Boolean = true,
