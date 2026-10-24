@@ -28,6 +28,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -47,7 +49,8 @@ import kotlin.math.sin
 
 /**
  * Полноценный сенсорный оверлей (Touch Controller) с аналоговым стиком WASD,
- * зоной обзора камеры, контекстными клавишами GLFW и режимом Drag-and-Drop редактирования.
+ * переключаемым виртуальным курсором мыши (MOUSE), зоной обзора камеры,
+ * контекстными клавишами GLFW и режимом Drag-and-Drop редактирования.
  */
 @Composable
 fun TouchControllerOverlay(
@@ -60,11 +63,17 @@ fun TouchControllerOverlay(
     onKeyEvent: (GlfwKeyBinding, Boolean) -> Unit,
     onAnalogMove: (Float, Float) -> Unit,
     onCameraLookDelta: (Float, Float) -> Unit,
+    isVirtualMouseActive: Boolean = false,
+    virtualMouseNormX: Float = 0.5f,
+    virtualMouseNormY: Float = 0.5f,
+    onVirtualMouseDelta: (Float, Float) -> Unit = { _, _ -> },
+    onVirtualMouseClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
     val toggledStates = remember { mutableStateMapOf<String, Boolean>() }
+    val currentMouseActive by rememberUpdatedState(isVirtualMouseActive)
 
     BoxWithConstraints(
         modifier = modifier
@@ -74,7 +83,7 @@ fun TouchControllerOverlay(
         val containerWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
         val containerHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
 
-        // Background grid when in Edit Mode, or Camera Look touchpad in Play Mode
+        // Background grid when in Edit Mode, or Camera Look / Virtual Mouse Touchpad in Play Mode
         if (isEditMode) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val stepX = size.width / 16f
@@ -97,14 +106,31 @@ fun TouchControllerOverlay(
                 }
             }
         } else {
-            // Free-look touch region across the viewport
+            // Free-look or Virtual Mouse touchpad across the viewport
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = {
+                                if (currentMouseActive) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onVirtualMouseClick()
+                                }
+                            }
+                        )
+                    }
+                    .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
-                            onCameraLookDelta(dragAmount.x, dragAmount.y)
+                            if (currentMouseActive) {
+                                onVirtualMouseDelta(
+                                    dragAmount.x / containerWidthPx,
+                                    dragAmount.y / containerHeightPx
+                                )
+                            } else {
+                                onCameraLookDelta(dragAmount.x, dragAmount.y)
+                            }
                         }
                     }
             )
@@ -114,7 +140,11 @@ fun TouchControllerOverlay(
         nodes.forEach { node ->
             val currentNode by rememberUpdatedState(node)
             val isSelected = isEditMode && selectedNodeId == node.id
-            val isStickyActive = toggledStates[node.id] == true
+            val isStickyActive = if (node.binding == GlfwKeyBinding.KEY_MOUSE_CURSOR) {
+                isVirtualMouseActive
+            } else {
+                toggledStates[node.id] == true
+            }
 
             val baseDp = if (node.binding == GlfwKeyBinding.ANALOG_STICK_WASD) 118.dp else 54.dp
             val scaledDp = baseDp * node.scale.coerceIn(0.5f, 1.8f)
@@ -176,7 +206,11 @@ fun TouchControllerOverlay(
                         if (pressed) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         }
-                        if (currentNode.isStickyToggle) {
+                        if (currentNode.binding == GlfwKeyBinding.KEY_MOUSE_CURSOR) {
+                            if (pressed) {
+                                onKeyEvent(GlfwKeyBinding.KEY_MOUSE_CURSOR, true)
+                            }
+                        } else if (currentNode.isStickyToggle) {
                             if (pressed) {
                                 val nextState = !(toggledStates[currentNode.id] ?: false)
                                 toggledStates[currentNode.id] = nextState
@@ -186,6 +220,43 @@ fun TouchControllerOverlay(
                             onKeyEvent(currentNode.binding, pressed)
                         }
                     }
+                )
+            }
+        }
+
+        // Virtual Mouse Cursor Pointer rendered on top when enabled
+        if (isVirtualMouseActive && !isEditMode) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val cx = (virtualMouseNormX * size.width).coerceIn(4f, size.width - 4f)
+                val cy = (virtualMouseNormY * size.height).coerceIn(4f, size.height - 4f)
+
+                // Subtle target reticle under the tip of the cursor
+                drawCircle(
+                    color = Color(0x5538C76A),
+                    radius = 12f,
+                    center = Offset(cx, cy),
+                    style = Stroke(width = 1.8f)
+                )
+
+                // Classic PC / Minecraft Java Arrow Cursor Path
+                val cursorPath = Path().apply {
+                    moveTo(cx, cy)
+                    lineTo(cx, cy + 26f)
+                    lineTo(cx + 6.8f, cy + 20.2f)
+                    lineTo(cx + 11.5f, cy + 30.5f)
+                    lineTo(cx + 15.8f, cy + 28.5f)
+                    lineTo(cx + 11.0f, cy + 18.2f)
+                    lineTo(cx + 19.5f, cy + 18.2f)
+                    close()
+                }
+
+                // White fill + dark outline + emerald core accent
+                drawPath(path = cursorPath, color = Color.White, style = Fill)
+                drawPath(path = cursorPath, color = Color(0xFF07160E), style = Stroke(width = 2.4f))
+                drawCircle(
+                    color = Color(0xFF38C76A),
+                    radius = 2.6f,
+                    center = Offset(cx + 5f, cy + 11f)
                 )
             }
         }
@@ -283,7 +354,6 @@ private fun AnalogStickWidget(
                 center = center,
                 style = Stroke(width = 2f)
             )
-            // WASD directional ticks
             drawLine(
                 color = Color(0x559AA8B6),
                 start = Offset(center.x, size.height * 0.12f),
@@ -308,7 +378,6 @@ private fun AnalogStickWidget(
                 end = Offset(size.width * 0.88f, center.y),
                 strokeWidth = 2f
             )
-            // Stick thumb nub
             drawCircle(
                 color = if (isSelected) Color(0xFFFFD84D) else Color(0xFF38C76A),
                 radius = size.minDimension * 0.20f,
@@ -347,7 +416,7 @@ private fun ContextActionButton(
     }
     val bgColor = when {
         isSelected -> Color(0xCC243129)
-        isStickyActive -> Color(0xCC1E3A2B)
+        isStickyActive -> Color(0xDD1A472E)
         else -> Color(0xBB13191F)
     }
 
@@ -391,12 +460,25 @@ private fun ContextActionButton(
         ) {
             Text(
                 text = node.binding.shortLabel,
-                color = if (isSelected) Color(0xFFFFD84D) else Color(0xFFF0F6FC),
-                fontSize = (11f * node.scale.coerceIn(0.8f, 1.3f)).sp,
+                color = if (isSelected) {
+                    Color(0xFFFFD84D)
+                } else if (isStickyActive && node.binding == GlfwKeyBinding.KEY_MOUSE_CURSOR) {
+                    Color(0xFF38C76A)
+                } else {
+                    Color(0xFFF0F6FC)
+                },
+                fontSize = (10.5f * node.scale.coerceIn(0.8f, 1.3f)).sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
-            if (node.isStickyToggle) {
+            if (node.binding == GlfwKeyBinding.KEY_MOUSE_CURSOR) {
+                Text(
+                    text = if (isStickyActive) "КУРСОР" else "ПРИЦЕЛ",
+                    color = if (isStickyActive) Color(0xFF38C76A) else Color(0xFF9AA8B6),
+                    fontSize = 7.5.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            } else if (node.isStickyToggle) {
                 Text(
                     text = if (isStickyActive) "HOLD" else "TOG",
                     color = if (isStickyActive) Color(0xFF38C76A) else Color(0xFF7D8B99),

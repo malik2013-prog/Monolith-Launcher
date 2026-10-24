@@ -51,7 +51,7 @@ jobs:
           echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
 
-      - name: Prepare Debug & Release Keystores
+      - name: Prepare Consistent Debug & Release Keystores
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           SECRET_STORE_PASS: ${{ secrets.STORE_PASSWORD }}
@@ -60,10 +60,10 @@ jobs:
           STORE_PASS="${SECRET_STORE_PASS:-android}"
           KEY_PASS="${SECRET_KEY_PASS:-android}"
 
-          # 1. Restore or generate debug.keystore
+          # 1. Restore or generate debug.keystore from debug.keystore.base64
           if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ]; then
             if [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
-              base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "${GITHUB_WORKSPACE}/debug.keystore"
+              tr -d '\r\n ' < "${GITHUB_WORKSPACE}/debug.keystore.base64" | base64 --decode > "${GITHUB_WORKSPACE}/debug.keystore"
             else
               keytool -genkeypair -v \
                 -keystore "${GITHUB_WORKSPACE}/debug.keystore" \
@@ -75,11 +75,29 @@ jobs:
             fi
           fi
 
-          # 2. Restore or generate my-upload-key.jks (alias: upload)
+          # 2. Restore my-upload-key.jks or clone consistent key from debug.keystore so APK upgrades never conflict
+          rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
+            echo "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
+          elif [ -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ "$STORE_PASS" = "android" ] && [ "$KEY_PASS" = "android" ]; then
+            keytool -importkeystore \
+              -srckeystore "${GITHUB_WORKSPACE}/debug.keystore" \
+              -srcstorepass "android" \
+              -srckeypass "android" \
+              -srcalias androiddebugkey \
+              -destkeystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+              -deststorepass "android" \
+              -destkeypass "android" \
+              -destalias upload \
+              -noprompt || \
+            keytool -genkeypair -v \
+              -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+              -alias upload \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=MonolithLauncher, OU=Android, O=VanillaCore, L=Stockholm, S=SE, C=SE"
           else
-            rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
             keytool -genkeypair -v \
               -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
               -alias upload \
@@ -103,7 +121,7 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Verify & Align Signature via apksigner
+      - name: Zipalign & Verify V1+V2+V3 APK Signature
         env:
           SECRET_STORE_PASS: ${{ secrets.STORE_PASSWORD }}
           SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
@@ -112,12 +130,17 @@ jobs:
           KEY_PASS="${SECRET_KEY_PASS:-android}"
 
           BUILT_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          FINAL_APK="app/build/outputs/apk/release/Monolith-Vanilla-Launcher-${GITHUB_REF_NAME}.apk"
-          cp "$BUILT_APK" "$FINAL_APK"
+          FINAL_APK="app/build/outputs/apk/release/Monolith-Vanilla-Launcher.apk"
 
+          ZIPALIGN_BIN=$(find "$ANDROID_HOME/build-tools" -name zipalign -type f 2>/dev/null | sort -V | tail -n 1 || true)
           APKSIGNER_BIN=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -n 1 || true)
-          if [ -n "$APKSIGNER_BIN" ]; then
+
+          if [ -n "$ZIPALIGN_BIN" ] && [ -n "$APKSIGNER_BIN" ]; then
+            "$ZIPALIGN_BIN" -p -f -v 4 "$BUILT_APK" "$FINAL_APK" > /dev/null
             "$APKSIGNER_BIN" sign \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
               --ks "${GITHUB_WORKSPACE}/my-upload-key.jks" \
               --ks-key-alias upload \
               --ks-pass "pass:${STORE_PASS}" \
@@ -125,7 +148,7 @@ jobs:
               "$FINAL_APK"
             "$APKSIGNER_BIN" verify --verbose "$FINAL_APK"
           else
-            keytool -printcert -jarfile "$FINAL_APK" > /dev/null
+            cp "$BUILT_APK" "$FINAL_APK"
           fi
 
           echo "SIGNED_APK_PATH=$FINAL_APK" >> "$GITHUB_ENV"
@@ -149,16 +172,15 @@ jobs:
           name: Monolith-Vanilla-Launcher-APK
           path: ${{ env.SIGNED_APK_PATH }}
 
-      - name: Publish APK to GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+      - name: Publish Direct .APK to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
-          if [[ ! "$TAG_NAME" =~ ^v ]]; then
-            TAG_NAME="v1.0.0-${GITHUB_RUN_NUMBER}"
+          TAG_NAME="v1.2.0-build-${GITHUB_RUN_NUMBER}"
+          if [[ "${GITHUB_REF_NAME}" =~ ^v ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
           fi
           gh release create "$TAG_NAME" "$SIGNED_APK_PATH" \
             --title "Monolith Vanilla Launcher $TAG_NAME" \
-            --notes "Monolith Vanilla Launcher (Android ARM64 / armeabi-v7a) — PojavLauncher Core, OpenJDK 8/17/21, Mojang Manifest V2, 2D/3D Skin Studio & AI Diagnostics." || \
+            --notes "Прямой установочный файл **Monolith-Vanilla-Launcher.apk** (не требует распаковки ZIP). Включает автоустановщик официальных компонентов Mojang (client.jar, libraries, assets) и кнопку виртуального курсора мыши (MOUSE)." || \
           gh release upload "$TAG_NAME" "$SIGNED_APK_PATH" --clobber

@@ -167,7 +167,8 @@ class VoxelWorld(
     }
 
     /**
-     * 3D Voxel DDA Raycast для точного разрушения (BREAK) и установки (PLACE) блоков.
+     * 3D Voxel DDA Raycast для точного разрушения (BREAK) и установки (PLACE) блоков
+     * как по центральному прицелу (+), так и по координатам виртуального курсора мыши (MOUSE).
      */
     fun raycast(
         eyeX: Float,
@@ -175,10 +176,14 @@ class VoxelWorld(
         eyeZ: Float,
         yawDeg: Float,
         pitchDeg: Float,
-        maxDist: Float = 6.0f
+        cursorNormX: Float = 0.5f,
+        cursorNormY: Float = 0.5f,
+        maxDist: Float = 6.5f
     ): RaycastHit? {
-        val yawRad = Math.toRadians(yawDeg.toDouble()).toFloat()
-        val pitchRad = Math.toRadians(pitchDeg.toDouble()).toFloat()
+        val effectiveYaw = yawDeg + (cursorNormX - 0.5f) * 78f
+        val effectivePitch = (pitchDeg + (0.5f - cursorNormY) * 52f).coerceIn(-89f, 89f)
+        val yawRad = Math.toRadians(effectiveYaw.toDouble()).toFloat()
+        val pitchRad = Math.toRadians(effectivePitch.toDouble()).toFloat()
 
         val dirX = sin(yawRad) * cos(pitchRad)
         val dirY = sin(pitchRad)

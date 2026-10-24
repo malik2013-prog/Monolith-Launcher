@@ -9,6 +9,7 @@ enum class GlfwKeyBinding(val glfwCode: Int, val shortLabel: String, val keyName
     KEY_SNEAK(340, "SNEAK", "GLFW_KEY_LEFT_SHIFT"),
     MOUSE_BREAK(0, "BREAK", "GLFW_MOUSE_BUTTON_LEFT"),
     MOUSE_PLACE(1, "PLACE", "GLFW_MOUSE_BUTTON_RIGHT"),
+    KEY_MOUSE_CURSOR(1001, "MOUSE", "GLFW_CURSOR_VIRTUAL_MOUSE"),
     KEY_INVENTORY(69, "INV", "GLFW_KEY_E"),
     KEY_CHAT(84, "CHAT", "GLFW_KEY_T"),
     KEY_DEBUG_F3(292, "F3", "GLFW_KEY_F3"),
@@ -31,6 +32,17 @@ data class VirtualControlNode(
 
 object ControllerProfileStorage {
 
+    private fun defaultMouseNode() = VirtualControlNode(
+        id = "btn_mouse",
+        binding = GlfwKeyBinding.KEY_MOUSE_CURSOR,
+        normalizedX = 0.21f,
+        normalizedY = 0.09f,
+        scale = 0.92f,
+        opacity = 0.90f,
+        isStickyToggle = true,
+        isPrimaryAction = true
+    )
+
     fun defaultLandscapeLayout(): List<VirtualControlNode> = listOf(
         VirtualControlNode(
             id = "stick_wasd",
@@ -41,6 +53,7 @@ object ControllerProfileStorage {
             opacity = 0.88f,
             isPrimaryAction = true
         ),
+        defaultMouseNode(),
         VirtualControlNode(
             id = "btn_jump",
             binding = GlfwKeyBinding.KEY_JUMP,
@@ -128,7 +141,7 @@ object ControllerProfileStorage {
     )
 
     fun loadLayout(filesDir: File): List<VirtualControlNode> {
-        val file = File(filesDir, "controller_layout_v2.json")
+        val file = File(filesDir, "controller_layout_v3.json")
         if (!file.exists()) return defaultLandscapeLayout()
         return runCatching {
             val arr = JSONArray(file.readText())
@@ -147,6 +160,9 @@ object ControllerProfileStorage {
                         isPrimaryAction = o.optBoolean("isPrimaryAction", false)
                     )
                 )
+            }
+            if (list.none { it.binding == GlfwKeyBinding.KEY_MOUSE_CURSOR }) {
+                list.add(1, defaultMouseNode())
             }
             list.ifEmpty { defaultLandscapeLayout() }
         }.getOrElse { defaultLandscapeLayout() }
@@ -169,7 +185,7 @@ object ControllerProfileStorage {
                     }
                 )
             }
-            File(filesDir, "controller_layout_v2.json").writeText(arr.toString(2))
+            File(filesDir, "controller_layout_v3.json").writeText(arr.toString(2))
         }
     }
 }

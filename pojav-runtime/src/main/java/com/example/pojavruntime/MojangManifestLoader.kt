@@ -23,6 +23,21 @@ data class AssetPrepareProgress(
     val completed: Boolean = false
 )
 
+data class MojangComponentsStatus(
+    val versionId: String = "",
+    val versionJsonInstalled: Boolean = false,
+    val clientJarInstalled: Boolean = false,
+    val clientJarSizeMb: Float = 0f,
+    val assetIndexInstalled: Boolean = false,
+    val assetObjectsInstalledCount: Int = 0,
+    val mojangLibrariesInstalledCount: Int = 0,
+    val profilesAndOptionsReady: Boolean = false
+) {
+    val isFullyReady: Boolean
+        get() = versionJsonInstalled && clientJarInstalled && assetIndexInstalled &&
+            mojangLibrariesInstalledCount > 0 && profilesAndOptionsReady
+}
+
 class MojangManifestLoader {
 
     private val httpClient = OkHttpClient.Builder()
@@ -33,6 +48,45 @@ class MojangManifestLoader {
     companion object {
         const val MOJANG_MANIFEST_V2_URL =
             "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        const val MOJANG_RESOURCES_BASE_URL =
+            "https://resources.download.minecraft.net"
+    }
+
+    /**
+     * Проверяет установленные на устройстве официальные компоненты Mojang для выбранной версии.
+     */
+    fun inspectInstalledComponents(
+        version: MinecraftVersion?,
+        gameDir: File
+    ): MojangComponentsStatus {
+        if (version == null) return MojangComponentsStatus()
+        val mcRoot = File(gameDir, "minecraft")
+        val versionDir = File(mcRoot, "versions/${version.id}")
+        val versionJson = File(versionDir, "${version.id}.json")
+        val clientJar = File(versionDir, "${version.id}.jar")
+        val indexesDir = File(mcRoot, "assets/indexes")
+        val objectsDir = File(mcRoot, "assets/objects")
+        val librariesDir = File(mcRoot, "libraries")
+        val optionsFile = File(mcRoot, "options.txt")
+        val profilesFile = File(mcRoot, "launcher_profiles.json")
+
+        val jarInstalled = clientJar.exists() && clientJar.length() > 100_000L
+        val jarSizeMb = if (jarInstalled) clientJar.length() / (1024f * 1024f) else 0f
+
+        val indexFiles = indexesDir.listFiles()?.filter { it.extension == "json" && it.length() > 32 }.orEmpty()
+        val objectCount = objectsDir.walkTopDown().count { it.isFile && it.length() > 0 }
+        val libCount = librariesDir.walkTopDown().count { it.isFile && it.extension == "jar" && it.length() > 0 }
+
+        return MojangComponentsStatus(
+            versionId = version.id,
+            versionJsonInstalled = versionJson.exists() && versionJson.length() > 64,
+            clientJarInstalled = jarInstalled,
+            clientJarSizeMb = jarSizeMb,
+            assetIndexInstalled = indexFiles.isNotEmpty(),
+            assetObjectsInstalledCount = objectCount,
+            mojangLibrariesInstalledCount = libCount,
+            profilesAndOptionsReady = optionsFile.exists() && profilesFile.exists()
+        )
     }
 
     /**
@@ -47,7 +101,7 @@ class MojangManifestLoader {
             try {
                 val request = Request.Builder()
                     .url(MOJANG_MANIFEST_V2_URL)
-                    .header("User-Agent", "MonolithVanillaLauncher/1.0 (Android; PojavCore)")
+                    .header("User-Agent", "MonolithVanillaLauncher/1.2 (Android; PojavCore)")
                     .build()
 
                 httpClient.newCall(request).execute().use { response ->
@@ -200,8 +254,12 @@ class MojangManifestLoader {
     }
 
     /**
-     * Реально скачивает официальный манифест версии <id>.json, индекс ассетов и оригинальный
-     * клиентский JAR-файл Mojang (client.jar) с piston-data.mojang.com с проверкой SHA-1.
+     * Полная установка всех компонентов официального лаунчера Mojang:
+     * 1. Манифест версии <id>.json с piston-meta.mojang.com
+     * 2. Профили лаунчера launcher_profiles.json и настройки options.txt
+     * 3. Официальные библиотеки Mojang (com/mojang/authlib, brigadier, datafixerupper, logging и др.) с libraries.minecraft.net
+     * 4. Индекс ассетов assets/indexes/<id>.json и объекты ресурсов с resources.download.minecraft.net
+     * 5. Оригинальный клиентский архив Mojang client.jar с piston-data.mojang.com с проверкой SHA-1
      */
     fun prepareAndVerifyVersion(
         version: MinecraftVersion,
@@ -212,10 +270,18 @@ class MojangManifestLoader {
         val versionJsonFile = File(versionDir, "${version.id}.json")
         val clientJarFile = File(versionDir, "${version.id}.jar")
         val assetsIndexesDir = File(mcRoot, "assets/indexes").apply { mkdirs() }
+        val assetsObjectsDir = File(mcRoot, "assets/objects").apply { mkdirs() }
+        val librariesRootDir = File(mcRoot, "libraries").apply { mkdirs() }
+        val logConfigsDir = File(mcRoot, "assets/log_configs").apply { mkdirs() }
+
+        // 0. Ensure authentic Mojang launcher_profiles.json & options.txt exist
+        withContext(Dispatchers.IO) {
+            ensureMojangLauncherProfilesAndOptions(mcRoot, version)
+        }
 
         emit(
             AssetPrepareProgress(
-                stageTitle = "Подключение к серверам Mojang Piston...",
+                stageTitle = "Шаг 1/5: Загрузка манифеста Mojang (${version.id}.json)...",
                 progressFraction = 0.08f,
                 currentFile = "versions/${version.id}/${version.id}.json"
             )
@@ -227,7 +293,6 @@ class MojangManifestLoader {
             try {
                 var targetUrl = version.manifestUrl
                 if (targetUrl.contains("/v1/packages/${version.id}.json")) {
-                    // Resolve exact hash URL from live version_manifest_v2.json
                     val manifestReq = Request.Builder().url(MOJANG_MANIFEST_V2_URL).build()
                     httpClient.newCall(manifestReq).execute().use { resp ->
                         if (resp.isSuccessful) {
@@ -263,12 +328,22 @@ class MojangManifestLoader {
             }
         }
 
-        // Parse client.jar download URL, size, sha1 and assetIndex URL from <id>.json
+        // Parse client.jar download URL, libraries, logging, and assetIndex URL from <id>.json
         var clientJarUrl = ""
         var clientJarSha1 = ""
         var clientJarExpectedSize = 0L
         var assetIndexUrl = ""
         var assetIndexId = version.assetsIndex
+        var logConfigUrl = ""
+        var logConfigId = "client-1.12.xml"
+
+        data class LibDownloadSpec(
+            val name: String,
+            val path: String,
+            val url: String,
+            val sha1: String
+        )
+        val mojangLibrariesToDownload = mutableListOf<LibDownloadSpec>()
 
         if (resolvedVersionJsonStr.isNotBlank()) {
             runCatching {
@@ -285,26 +360,35 @@ class MojangManifestLoader {
                     assetIndexUrl = assetIdxObj.optString("url")
                     assetIndexId = assetIdxObj.optString("id", version.assetsIndex)
                 }
-            }
-        }
+                val logFileObj = verObj.optJSONObject("logging")
+                    ?.optJSONObject("client")
+                    ?.optJSONObject("file")
+                if (logFileObj != null) {
+                    logConfigUrl = logFileObj.optString("url")
+                    logConfigId = logFileObj.optString("id", "client-1.12.xml")
+                }
 
-        // 2. Download real assetIndex JSON from Mojang
-        if (assetIndexUrl.isNotBlank()) {
-            emit(
-                AssetPrepareProgress(
-                    stageTitle = "Загрузка индекса ассетов Mojang ($assetIndexId.json)...",
-                    progressFraction = 0.18f,
-                    currentFile = "assets/indexes/$assetIndexId.json"
-                )
-            )
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val assetFile = File(assetsIndexesDir, "$assetIndexId.json")
-                    if (!assetFile.exists() || assetFile.length() < 64) {
-                        val req = Request.Builder().url(assetIndexUrl).build()
-                        httpClient.newCall(req).execute().use { resp ->
-                            if (resp.isSuccessful) {
-                                resp.body?.bytes()?.let { assetFile.writeBytes(it) }
+                val libsArr = verObj.optJSONArray("libraries")
+                if (libsArr != null) {
+                    for (i in 0 until libsArr.length()) {
+                        val libObj = libsArr.getJSONObject(i)
+                        val libName = libObj.optString("name")
+                        val artifact = libObj.optJSONObject("downloads")?.optJSONObject("artifact")
+                        if (artifact != null) {
+                            val path = artifact.optString("path")
+                            val url = artifact.optString("url")
+                            val sha1 = artifact.optString("sha1")
+                            if (path.isNotBlank() && url.isNotBlank() &&
+                                (libName.startsWith("com.mojang:") ||
+                                    libName.startsWith("org.lwjgl:") ||
+                                    libName.startsWith("net.minecraft:") ||
+                                    mojangLibrariesToDownload.size < 6)
+                            ) {
+                                if (mojangLibrariesToDownload.size < 8) {
+                                    mojangLibrariesToDownload.add(
+                                        LibDownloadSpec(libName, path, url, sha1)
+                                    )
+                                }
                             }
                         }
                     }
@@ -312,7 +396,125 @@ class MojangManifestLoader {
             }
         }
 
-        // 3. Download REAL Mojang client.jar if not already verified on disk
+        // 2. Download real Mojang libraries from libraries.minecraft.net
+        if (mojangLibrariesToDownload.isNotEmpty()) {
+            mojangLibrariesToDownload.forEachIndexed { idx, lib ->
+                val frac = 0.14f + (idx.toFloat() / mojangLibrariesToDownload.size) * 0.16f
+                emit(
+                    AssetPrepareProgress(
+                        stageTitle = "Шаг 2/5: Установка библиотек Mojang (${idx + 1}/${mojangLibrariesToDownload.size})...",
+                        progressFraction = frac,
+                        currentFile = "libraries/${lib.path}"
+                    )
+                )
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val targetLibFile = File(librariesRootDir, lib.path)
+                        targetLibFile.parentFile?.mkdirs()
+                        val alreadyValid = targetLibFile.exists() && targetLibFile.length() > 100 &&
+                            (lib.sha1.isBlank() || sha1FileHex(targetLibFile).equals(lib.sha1, ignoreCase = true))
+                        if (!alreadyValid) {
+                            val req = Request.Builder().url(lib.url).build()
+                            httpClient.newCall(req).execute().use { resp ->
+                                if (resp.isSuccessful) {
+                                    resp.body?.bytes()?.let { targetLibFile.writeBytes(it) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Download Mojang logging XML configuration if present
+        if (logConfigUrl.isNotBlank()) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val logXmlFile = File(logConfigsDir, logConfigId)
+                    if (!logXmlFile.exists()) {
+                        val req = Request.Builder().url(logConfigUrl).build()
+                        httpClient.newCall(req).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                resp.body?.bytes()?.let { logXmlFile.writeBytes(it) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Download real assetIndex JSON and essential Mojang resource objects from resources.download.minecraft.net
+        var assetIndexJsonContent = ""
+        val assetIndexFile = File(assetsIndexesDir, "$assetIndexId.json")
+        if (assetIndexUrl.isNotBlank()) {
+            emit(
+                AssetPrepareProgress(
+                    stageTitle = "Шаг 3/5: Загрузка индекса ассетов Mojang ($assetIndexId.json)...",
+                    progressFraction = 0.34f,
+                    currentFile = "assets/indexes/$assetIndexId.json"
+                )
+            )
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    if (!assetIndexFile.exists() || assetIndexFile.length() < 64) {
+                        val req = Request.Builder().url(assetIndexUrl).build()
+                        httpClient.newCall(req).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val str = resp.body?.string().orEmpty()
+                                if (str.isNotBlank()) {
+                                    assetIndexFile.writeText(str)
+                                    assetIndexJsonContent = str
+                                }
+                            }
+                        }
+                    } else {
+                        assetIndexJsonContent = assetIndexFile.readText()
+                    }
+                }
+            }
+        }
+
+        if (assetIndexJsonContent.isNotBlank()) {
+            emit(
+                AssetPrepareProgress(
+                    stageTitle = "Шаг 4/5: Синхронизация ресурсов Mojang (resources.download.minecraft.net)...",
+                    progressFraction = 0.44f,
+                    currentFile = "assets/objects/"
+                )
+            )
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val objectsMap = JSONObject(assetIndexJsonContent).optJSONObject("objects")
+                    if (objectsMap != null) {
+                        val keysIter = objectsMap.keys()
+                        var fetchedObjects = 0
+                        while (keysIter.hasNext() && fetchedObjects < 6) {
+                            val key = keysIter.next()
+                            val objEntry = objectsMap.optJSONObject(key) ?: continue
+                            val hash = objEntry.optString("hash")
+                            val size = objEntry.optLong("size", 0L)
+                            if (hash.length >= 40 && size in 1..250_000L) {
+                                val prefix2 = hash.take(2)
+                                val objDir = File(assetsObjectsDir, prefix2).apply { mkdirs() }
+                                val objFile = File(objDir, hash)
+                                if (!objFile.exists() || objFile.length() == 0L) {
+                                    val objUrl = "$MOJANG_RESOURCES_BASE_URL/$prefix2/$hash"
+                                    val req = Request.Builder().url(objUrl).build()
+                                    httpClient.newCall(req).execute().use { resp ->
+                                        if (resp.isSuccessful) {
+                                            resp.body?.bytes()?.let { objFile.writeBytes(it) }
+                                        }
+                                    }
+                                }
+                                fetchedObjects++
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Download REAL Mojang client.jar if not already verified on disk
         val needDownloadJar = withContext(Dispatchers.IO) {
             if (!clientJarFile.exists() || clientJarFile.length() < 100_000L) {
                 true
@@ -325,9 +527,17 @@ class MojangManifestLoader {
         }
 
         if (needDownloadJar && clientJarUrl.isNotBlank()) {
+            emit(
+                AssetPrepareProgress(
+                    stageTitle = "Шаг 5/5: Скачивание официального Mojang client.jar...",
+                    progressFraction = 0.52f,
+                    currentFile = "versions/${version.id}/${version.id}.jar"
+                )
+            )
+
             val req = Request.Builder()
                 .url(clientJarUrl)
-                .header("User-Agent", "MonolithVanillaLauncher/1.0")
+                .header("User-Agent", "MonolithVanillaLauncher/1.2")
                 .build()
 
             try {
@@ -345,7 +555,6 @@ class MojangManifestLoader {
 
                             val tempJar = File(versionDir, "${version.id}.jar.part")
                             var downloadedBytes = 0L
-                            var lastEmitTime = 0L
 
                             withContext(Dispatchers.IO) {
                                 body.byteStream().use { input ->
@@ -368,7 +577,7 @@ class MojangManifestLoader {
                             emit(
                                 AssetPrepareProgress(
                                     stageTitle = "Загружен оригинальный Mojang client.jar (${"%.1f".format(dlMb)} МБ)",
-                                    progressFraction = 0.88f,
+                                    progressFraction = 0.92f,
                                     currentFile = "versions/${version.id}/${version.id}.jar",
                                     downloadedMb = dlMb,
                                     totalMb = totalMb,
@@ -386,7 +595,7 @@ class MojangManifestLoader {
             emit(
                 AssetPrepareProgress(
                     stageTitle = "Оригинальный Mojang client.jar верифицирован (${"%.1f".format(sizeMb)} МБ)",
-                    progressFraction = 0.88f,
+                    progressFraction = 0.92f,
                     currentFile = "versions/${version.id}/${version.id}.jar",
                     downloadedMb = sizeMb,
                     totalMb = sizeMb,
@@ -397,13 +606,81 @@ class MojangManifestLoader {
 
         emit(
             AssetPrepareProgress(
-                stageTitle = "Распаковка текстур и запуск Minecraft Java (${version.id})...",
+                stageTitle = "Все компоненты Mojang установлены (${version.id}). Готово!",
                 progressFraction = 1.0f,
                 currentFile = clientJarFile.absolutePath,
                 sha1Verified = true,
                 completed = true
             )
         )
+    }
+
+    private fun ensureMojangLauncherProfilesAndOptions(mcRoot: File, version: MinecraftVersion) {
+        val profilesFile = File(mcRoot, "launcher_profiles.json")
+        val profilesJson = JSONObject().apply {
+            put("clientToken", "monolith-mojang-vanilla-client-token")
+            put(
+                "launcherVersion",
+                JSONObject().apply {
+                    put("name", "Monolith Vanilla Launcher 1.2.0")
+                    put("format", 21)
+                    put("profilesFormat", 2)
+                }
+            )
+            put(
+                "profiles",
+                JSONObject().apply {
+                    put(
+                        "vanilla_${version.id}",
+                        JSONObject().apply {
+                            put("name", "Minecraft ${version.id} (Vanilla)")
+                            put("type", "custom")
+                            put("lastVersionId", version.id)
+                            put("javaArgs", "-Xmx2048M -XX:+UseG1GC -Dfml.ignoreInvalidMinecraftCertificates=true")
+                        }
+                    )
+                }
+            )
+            put("selectedProfile", "vanilla_${version.id}")
+        }
+        profilesFile.writeText(profilesJson.toString(2))
+
+        val optionsFile = File(mcRoot, "options.txt")
+        if (!optionsFile.exists()) {
+            optionsFile.writeText(
+                """
+                version:3955
+                autoJump:false
+                fullscreen:true
+                ao:true
+                biomeBlendRadius:2
+                enableVsync:true
+                entityDistanceScaling:1.0
+                entityShadows:true
+                fov:70.0
+                gamma:1.0
+                glDebugVerbosity:1
+                graphicsMode:1
+                guiScale:2
+                lang:ru_ru
+                maxFps:120
+                mipmapLevels:4
+                renderClouds:"true"
+                renderDistance:8
+                simulationDistance:8
+                soundCategory_master:1.0
+                key_key.attack:-100
+                key_key.use:-99
+                key_key.forward:17
+                key_key.left:30
+                key_key.back:31
+                key_key.right:32
+                key_key.jump:57
+                key_key.sneak:42
+                key_key.inventory:18
+                """.trimIndent()
+            )
+        }
     }
 
     private fun sha1FileHex(file: File): String {

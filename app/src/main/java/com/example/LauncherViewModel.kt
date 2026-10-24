@@ -21,6 +21,7 @@ import com.example.pojavruntime.JavaRuntimeMajor
 import com.example.pojavruntime.JvmRuntimeConfig
 import com.example.pojavruntime.MinecraftVersion
 import com.example.pojavruntime.MobileGlRenderer
+import com.example.pojavruntime.MojangComponentsStatus
 import com.example.pojavruntime.MojangManifestLoader
 import com.example.pojavruntime.OneClickFixAction
 import com.example.pojavruntime.PojavLaunchSpec
@@ -58,6 +59,7 @@ data class LauncherUiState(
     val selectedVersion: MinecraftVersion? = null,
     val isFetchingManifest: Boolean = false,
     val prepareProgress: AssetPrepareProgress? = null,
+    val mojangComponentsStatus: MojangComponentsStatus = MojangComponentsStatus(),
     val runtimeConfig: JvmRuntimeConfig = JvmRuntimeConfig(),
     val accounts: List<MinecraftAccount> = emptyList(),
     val authStatusMessage: String = "",
@@ -66,6 +68,9 @@ data class LauncherUiState(
     val controllerEditMode: Boolean = true,
     val controllerSnapToGrid: Boolean = true,
     val lastPressedGlfwKey: String = "IDLE",
+    val isVirtualMouseEnabled: Boolean = false,
+    val virtualMouseX: Float = 0.5f,
+    val virtualMouseY: Float = 0.5f,
     val analogVectorX: Float = 0f,
     val analogVectorY: Float = 0f,
     val cameraYaw: Float = 135f,
@@ -130,6 +135,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         val curatedVersions = manifestLoader.curatedHistoricalCatalog()
         val firstVer = curatedVersions.first()
         val hwProfile = aiEngine.inspectAndTuneHardware(appContext, firstVer, 120)
+        val initialCompStatus = manifestLoader.inspectInstalledComponents(firstVer, appContext.filesDir)
 
         val defaultLogs = listOf(
             "[08:10:01] [PojavCore/INFO]: Monolith Vanilla Runner initialized on ${hwProfile.socName} (${hwProfile.primaryAbi})",
@@ -148,6 +154,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 allSplashQuotes = splashes,
                 versions = curatedVersions,
                 selectedVersion = firstVer,
+                mojangComponentsStatus = initialCompStatus,
                 accounts = initialAccounts,
                 controllerNodes = initialController,
                 skinPixels = initialSkin,
@@ -198,12 +205,15 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     fun exitFullscreenGameToLauncher() {
         activeGlRenderer?.moveInputX = 0f
         activeGlRenderer?.moveInputY = 0f
+        val ver = _uiState.value.selectedVersion
+        val updatedStatus = manifestLoader.inspectInstalledComponents(ver, appContext.filesDir)
         _uiState.update {
             it.copy(
                 currentDestination = LauncherDestination.PLAY_HUB,
                 isGameSessionRunning = false,
                 showPauseMenuModal = false,
-                showInventoryModal = false
+                showInventoryModal = false,
+                mojangComponentsStatus = updatedStatus
             )
         }
     }
@@ -230,9 +240,11 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             _uiState.update { state ->
                 val currentId = state.selectedVersion?.id
                 val chosen = loaded.firstOrNull { it.id == currentId } ?: loaded.firstOrNull()
+                val compStatus = manifestLoader.inspectInstalledComponents(chosen, appContext.filesDir)
                 state.copy(
                     versions = loaded,
                     selectedVersion = chosen,
+                    mojangComponentsStatus = compStatus,
                     isFetchingManifest = false
                 )
             }
@@ -253,6 +265,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             targetVersion = version,
             targetFps = _uiState.value.runtimeConfig.targetFps
         )
+        val compStatus = manifestLoader.inspectInstalledComponents(version, appContext.filesDir)
         _uiState.update { state ->
             val updatedRuntime = if (state.runtimeConfig.autoSelectJava) {
                 state.runtimeConfig.copy(selectedJava = version.recommendedJava)
@@ -261,9 +274,30 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             }
             state.copy(
                 selectedVersion = version,
+                mojangComponentsStatus = compStatus,
                 runtimeConfig = updatedRuntime,
                 hardwareProfile = hw
             )
+        }
+    }
+
+    /**
+     * Отдельная кнопка установки и проверки всех официальных компонентов Mojang без немедленного входа в 3D-окно.
+     */
+    fun installMojangComponentsOnly() {
+        val version = _uiState.value.selectedVersion ?: return
+        viewModelScope.launch {
+            manifestLoader.prepareAndVerifyVersion(version, appContext.filesDir)
+                .collect { progress ->
+                    _uiState.update { it.copy(prepareProgress = progress) }
+                }
+            val updatedStatus = manifestLoader.inspectInstalledComponents(version, appContext.filesDir)
+            _uiState.update {
+                it.copy(
+                    prepareProgress = null,
+                    mojangComponentsStatus = updatedStatus
+                )
+            }
         }
     }
 
@@ -282,9 +316,12 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                     _uiState.update { it.copy(prepareProgress = progress) }
                 }
 
+            val updatedStatus = manifestLoader.inspectInstalledComponents(version, appContext.filesDir)
+
             _uiState.update {
                 it.copy(
                     prepareProgress = null,
+                    mojangComponentsStatus = updatedStatus,
                     currentDestination = LauncherDestination.GAME_SESSION,
                     isGameSessionRunning = true,
                     showPauseMenuModal = false,
@@ -352,20 +389,80 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun togglePauseMenuModal(show: Boolean) {
-        _uiState.update { it.copy(showPauseMenuModal = show, showInventoryModal = false) }
+        _uiState.update {
+            it.copy(
+                showPauseMenuModal = show,
+                showInventoryModal = false,
+                isVirtualMouseEnabled = if (show) true else it.isVirtualMouseEnabled
+            )
+        }
     }
 
     fun toggleInventoryModal(show: Boolean) {
-        _uiState.update { it.copy(showInventoryModal = show, showPauseMenuModal = false) }
+        _uiState.update {
+            it.copy(
+                showInventoryModal = show,
+                showPauseMenuModal = false,
+                isVirtualMouseEnabled = if (show) true else it.isVirtualMouseEnabled
+            )
+        }
+    }
+
+    fun toggleVirtualMouseCursor() {
+        _uiState.update { state ->
+            val next = !state.isVirtualMouseEnabled
+            state.copy(
+                isVirtualMouseEnabled = next,
+                targetedBlockInfo = if (next) "Курсор мыши: ВКЛ (свободный указатель)" else "Курсор мыши: ВЫКЛ (прицел камеры)"
+            )
+        }
+    }
+
+    fun onVirtualMouseDelta(dxNorm: Float, dyNorm: Float) {
+        val renderer = activeGlRenderer
+        val nextX = (_uiState.value.virtualMouseX + dxNorm * 1.15f).coerceIn(0.02f, 0.98f)
+        val nextY = (_uiState.value.virtualMouseY + dyNorm * 1.15f).coerceIn(0.02f, 0.98f)
+
+        var hoverText = _uiState.value.targetedBlockInfo
+        if (renderer != null) {
+            val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
+            val hit = voxelWorld.raycast(
+                renderer.playerX, eyeY, renderer.playerZ,
+                renderer.cameraYaw, renderer.cameraPitch,
+                cursorNormX = nextX, cursorNormY = nextY
+            )
+            if (hit != null) {
+                hoverText = "Курсор на: ${hit.blockType.displayName} (${hit.blockX}, ${hit.blockY}, ${hit.blockZ})"
+            }
+        }
+
+        _uiState.update {
+            it.copy(
+                virtualMouseX = nextX,
+                virtualMouseY = nextY,
+                targetedBlockInfo = hoverText
+            )
+        }
+    }
+
+    fun onVirtualMouseClick() {
+        // When tapping the viewport in Virtual Mouse mode, break or interact with the block under the cursor
+        onGlfwKeyEvent(GlfwKeyBinding.MOUSE_BREAK, true)
     }
 
     // --- 3. Touch Controller & 3D Voxel Gameplay Interaction ---
 
     fun onGlfwKeyEvent(binding: GlfwKeyBinding, pressed: Boolean) {
         val renderer = activeGlRenderer
+        val curState = _uiState.value
+        val rayX = if (curState.isVirtualMouseEnabled) curState.virtualMouseX else 0.5f
+        val rayY = if (curState.isVirtualMouseEnabled) curState.virtualMouseY else 0.5f
 
         if (pressed) {
             when (binding) {
+                GlfwKeyBinding.KEY_MOUSE_CURSOR -> {
+                    toggleVirtualMouseCursor()
+                }
                 GlfwKeyBinding.KEY_JUMP -> {
                     renderer?.triggerJump()
                 }
@@ -378,7 +475,8 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                         val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
                         val hit = voxelWorld.raycast(
                             renderer.playerX, eyeY, renderer.playerZ,
-                            renderer.cameraYaw, renderer.cameraPitch
+                            renderer.cameraYaw, renderer.cameraPitch,
+                            cursorNormX = rayX, cursorNormY = rayY
                         )
                         if (hit != null && hit.blockType != VoxelBlockType.BEDROCK) {
                             voxelWorld.setBlock(hit.blockX, hit.blockY, hit.blockZ, VoxelBlockType.AIR)
@@ -393,13 +491,13 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                         val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
                         val hit = voxelWorld.raycast(
                             renderer.playerX, eyeY, renderer.playerZ,
-                            renderer.cameraYaw, renderer.cameraPitch
+                            renderer.cameraYaw, renderer.cameraPitch,
+                            cursorNormX = rayX, cursorNormY = rayY
                         )
                         if (hit != null) {
                             val chosenBlock = _uiState.value.hotbarBlocks.getOrElse(_uiState.value.selectedHotbarSlot) {
                                 VoxelBlockType.COBBLESTONE
                             }
-                            // Avoid placing block directly inside the player's body
                             val pBlockX = kotlin.math.floor(renderer.playerX).toInt()
                             val pBlockY = kotlin.math.floor(renderer.playerY).toInt()
                             val pBlockZ = kotlin.math.floor(renderer.playerZ).toInt()
@@ -415,10 +513,24 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                     }
                 }
                 GlfwKeyBinding.KEY_INVENTORY -> {
-                    _uiState.update { it.copy(showInventoryModal = !it.showInventoryModal, showPauseMenuModal = false) }
+                    val nextInv = !_uiState.value.showInventoryModal
+                    _uiState.update {
+                        it.copy(
+                            showInventoryModal = nextInv,
+                            showPauseMenuModal = false,
+                            isVirtualMouseEnabled = if (nextInv) true else it.isVirtualMouseEnabled
+                        )
+                    }
                 }
                 GlfwKeyBinding.KEY_PAUSE_ESC -> {
-                    _uiState.update { it.copy(showPauseMenuModal = !it.showPauseMenuModal, showInventoryModal = false) }
+                    val nextEsc = !_uiState.value.showPauseMenuModal
+                    _uiState.update {
+                        it.copy(
+                            showPauseMenuModal = nextEsc,
+                            showInventoryModal = false,
+                            isVirtualMouseEnabled = if (nextEsc) true else it.isVirtualMouseEnabled
+                        )
+                    }
                 }
                 GlfwKeyBinding.KEY_THIRD_PERSON_F5 -> {
                     val nextF5 = !_uiState.value.isThirdPersonView

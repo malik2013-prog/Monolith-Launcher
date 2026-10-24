@@ -237,6 +237,7 @@ fun PlayHubLandscapeScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
+                        val comp = state.mojangComponentsStatus
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -244,53 +245,64 @@ fun PlayHubLandscapeScreen(
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
                                 .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
                             TechSpecRow("Среда OpenJDK", effectiveJava.title)
                             TechSpecRow("Рендерер GPU", state.runtimeConfig.renderer.title)
                             TechSpecRow("Пул памяти JVM", "-Xmx${state.runtimeConfig.allocatedMemoryMb}M (${state.runtimeConfig.gcAlgorithm.title})")
                             TechSpecRow(
-                                "Статус client.jar",
-                                if (jarExists) "Установлен (Mojang Official JAR)" else "Скачается с piston-data.mojang.com"
+                                "Клиент Mojang client.jar",
+                                if (comp.clientJarInstalled || jarExists) {
+                                    "Установлен (${"%.1f".format(comp.clientJarSizeMb.coerceAtLeast(15.0f))} МБ)"
+                                } else {
+                                    "Готов к скачиванию (piston-data.mojang.com)"
+                                }
                             )
                             TechSpecRow(
-                                "Активный профиль",
-                                "${activeAccount?.username ?: "Steve"} (${activeAccount?.mode?.badge ?: "Offline"})"
+                                "Библиотеки и Ассеты Mojang",
+                                if (comp.mojangLibrariesInstalledCount > 0 || comp.assetIndexInstalled) {
+                                    "JAR: ${comp.mojangLibrariesInstalledCount} шт. • Objects: ${comp.assetObjectsInstalledCount} шт."
+                                } else {
+                                    "Установятся автоматически"
+                                }
+                            )
+                            TechSpecRow(
+                                "Профиль и options.txt",
+                                "${activeAccount?.username ?: "Steve"} (${if (comp.profilesAndOptionsReady) "Готово" else "Создастся"})"
                             )
                         }
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             OutlinedButton(
-                                onClick = { viewModel.navigateTo(LauncherDestination.AI_ENGINEER) },
+                                onClick = { viewModel.installMojangComponentsOnly() },
+                                enabled = state.prepareProgress == null,
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("quick_ai_tune_button")
+                                    .weight(1.15f)
+                                    .testTag("install_mojang_components_button")
                             ) {
-                                Icon(
-                                    painter = painterResource(id = R.drawable.ic_ai_spark),
-                                    contentDescription = "AI Тюнер",
-                                    modifier = Modifier.size(16.dp),
-                                    tint = SplashGold
+                                Text(
+                                    text = if (comp.isFullyReady) "Проверить файлы Mojang" else "Установить файлы Mojang",
+                                    fontSize = 11.sp,
+                                    maxLines = 1
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("AI Тюнер", fontSize = 12.sp)
                             }
                             OutlinedButton(
                                 onClick = { viewModel.navigateTo(LauncherDestination.TOUCH_CONTROLLER) },
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .weight(0.85f)
                                     .testTag("quick_controller_button")
                             ) {
                                 Icon(
-                                    painter = painterResource(id = R.drawable.ic_gamepad),
-                                    contentDescription = "Раскладка",
-                                    modifier = Modifier.size(16.dp)
+                                    painter = painterResource(id = R.drawable.ic_mouse_cursor),
+                                    contentDescription = "Мышь и Управление",
+                                    tint = Color.Unspecified,
+                                    modifier = Modifier.size(15.dp)
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Управление", fontSize = 12.sp)
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text("Мышь / Тач", fontSize = 11.sp, maxLines = 1)
                             }
                         }
                     }
@@ -618,15 +630,17 @@ fun GameSessionLandscapeScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Center Crosshair (+)
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val cx = size.width / 2f
-            val cy = size.height / 2f
-            drawLine(Color.White, Offset(cx - 11f, cy), Offset(cx + 11f, cy), strokeWidth = 2.2f)
-            drawLine(Color.White, Offset(cx, cy - 11f), Offset(cx, cy + 11f), strokeWidth = 2.2f)
+        // 2. Center Crosshair (+) when camera lock is active
+        if (!state.isVirtualMouseEnabled) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val cx = size.width / 2f
+                val cy = size.height / 2f
+                drawLine(Color.White, Offset(cx - 11f, cy), Offset(cx + 11f, cy), strokeWidth = 2.2f)
+                drawLine(Color.White, Offset(cx, cy - 11f), Offset(cx, cy + 11f), strokeWidth = 2.2f)
+            }
         }
 
-        // 3. Touch Controller Overlay (WASD Analog Stick + Camera Look + Break/Place/Jump/Sneak/Inv/F3/F5/Esc)
+        // 3. Touch Controller Overlay (WASD Stick + Virtual Mouse Cursor (MOUSE) + Camera Look + Break/Place/Jump/Sneak/Inv/F3/F5/Esc)
         TouchControllerOverlay(
             nodes = state.controllerNodes,
             isEditMode = false,
@@ -636,7 +650,12 @@ fun GameSessionLandscapeScreen(
             onUpdateNodePosition = { _, _, _ -> },
             onKeyEvent = { binding, pressed -> viewModel.onGlfwKeyEvent(binding, pressed) },
             onAnalogMove = { vx, vy -> viewModel.onAnalogMove(vx, vy) },
-            onCameraLookDelta = { dx, dy -> viewModel.onCameraLookDelta(dx, dy) }
+            onCameraLookDelta = { dx, dy -> viewModel.onCameraLookDelta(dx, dy) },
+            isVirtualMouseActive = state.isVirtualMouseEnabled,
+            virtualMouseNormX = state.virtualMouseX,
+            virtualMouseNormY = state.virtualMouseY,
+            onVirtualMouseDelta = { dx, dy -> viewModel.onVirtualMouseDelta(dx, dy) },
+            onVirtualMouseClick = { viewModel.onVirtualMouseClick() }
         )
 
         // 4. Authentic 9-Slot Minecraft Hotbar at Bottom Center
@@ -744,13 +763,36 @@ fun GameSessionLandscapeScreen(
             }
         }
 
-        // 6. Top-Right Quick Exit & Console Buttons
+        // 6. Top-Right Quick Mouse Cursor, Console & Menu Buttons
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            Button(
+                onClick = { viewModel.toggleVirtualMouseCursor() },
+                modifier = Modifier
+                    .height(32.dp)
+                    .testTag("toggle_virtual_mouse_button"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (state.isVirtualMouseEnabled) EmeraldPrimary else Color(0xCC1E262E),
+                    contentColor = if (state.isVirtualMouseEnabled) Color(0xFF041A0C) else Color.White
+                )
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_mouse_cursor),
+                    contentDescription = "Курсор мыши",
+                    tint = Color.Unspecified,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = if (state.isVirtualMouseEnabled) "Курсор: ВКЛ" else "Курсор",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             OutlinedButton(
                 onClick = { viewModel.toggleSessionConsoleDrawer() },
                 modifier = Modifier
@@ -980,7 +1022,12 @@ fun TouchControllerStudioScreen(
                 onUpdateNodePosition = { id, nx, ny -> viewModel.updateControllerNodePosition(id, nx, ny) },
                 onKeyEvent = { binding, pressed -> viewModel.onGlfwKeyEvent(binding, pressed) },
                 onAnalogMove = { vx, vy -> viewModel.onAnalogMove(vx, vy) },
-                onCameraLookDelta = { dx, dy -> viewModel.onCameraLookDelta(dx, dy) }
+                onCameraLookDelta = { dx, dy -> viewModel.onCameraLookDelta(dx, dy) },
+                isVirtualMouseActive = state.isVirtualMouseEnabled,
+                virtualMouseNormX = state.virtualMouseX,
+                virtualMouseNormY = state.virtualMouseY,
+                onVirtualMouseDelta = { dx, dy -> viewModel.onVirtualMouseDelta(dx, dy) },
+                onVirtualMouseClick = { viewModel.onVirtualMouseClick() }
             )
 
             Text(
