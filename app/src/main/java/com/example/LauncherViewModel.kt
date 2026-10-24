@@ -9,6 +9,9 @@ import com.example.auth.MinecraftAccount
 import com.example.controller.ControllerProfileStorage
 import com.example.controller.GlfwKeyBinding
 import com.example.controller.VirtualControlNode
+import com.example.engine.MinecraftVoxelGlRenderer
+import com.example.engine.VoxelBlockType
+import com.example.engine.VoxelWorld
 import com.example.pojavruntime.AiCrashAndHardwareEngine
 import com.example.pojavruntime.AssetPrepareProgress
 import com.example.pojavruntime.CrashDiagnosis
@@ -33,10 +36,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 
 enum class LauncherDestination(val title: String) {
     PLAY_HUB("Запуск"),
-    GAME_SESSION("Сессия"),
+    GAME_SESSION("Игра 3D"),
     TOUCH_CONTROLLER("Контроллер"),
     SKIN_STUDIO("Скины 2D/3D"),
     ACCOUNTS_AUTH("Аккаунты"),
@@ -64,11 +68,21 @@ data class LauncherUiState(
     val lastPressedGlfwKey: String = "IDLE",
     val analogVectorX: Float = 0f,
     val analogVectorY: Float = 0f,
-    val cameraYaw: Float = 24f,
-    val cameraPitch: Float = -10f,
+    val cameraYaw: Float = 135f,
+    val cameraPitch: Float = -12f,
+    val playerX: Float = 15.5f,
+    val playerY: Float = 10.0f,
+    val playerZ: Float = 15.5f,
+    val selectedHotbarSlot: Int = 0,
+    val hotbarBlocks: List<VoxelBlockType> = VoxelBlockType.hotbarBlocks,
+    val showInventoryModal: Boolean = false,
+    val showPauseMenuModal: Boolean = false,
+    val isThirdPersonView: Boolean = false,
+    val loadedMojangJarTextures: Boolean = false,
+    val targetedBlockInfo: String = "Block: Grass Block",
     val gameLogs: List<String> = emptyList(),
     val isGameSessionRunning: Boolean = false,
-    val showSessionDebugF3: Boolean = true,
+    val showSessionDebugF3: Boolean = false,
     val showSessionConsoleDrawer: Boolean = false,
     val skinFormat: SkinFormat = SkinFormat.MODERN_64X64,
     val skinPixels: IntArray = IntArray(64 * 64),
@@ -96,6 +110,9 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private val authManager = AuthAccountManager()
     private val skinClient = MojangAndElySkinClient()
     private val geminiAssistant = GeminiHybridAssistant()
+
+    val voxelWorld = VoxelWorld()
+    var activeGlRenderer: MinecraftVoxelGlRenderer? = null
 
     private val skinUndoStack = ArrayDeque<IntArray>()
 
@@ -168,7 +185,36 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun navigateTo(destination: LauncherDestination) {
-        _uiState.update { it.copy(currentDestination = destination) }
+        _uiState.update {
+            it.copy(
+                currentDestination = destination,
+                isGameSessionRunning = destination == LauncherDestination.GAME_SESSION,
+                showPauseMenuModal = false,
+                showInventoryModal = false
+            )
+        }
+    }
+
+    fun exitFullscreenGameToLauncher() {
+        activeGlRenderer?.moveInputX = 0f
+        activeGlRenderer?.moveInputY = 0f
+        _uiState.update {
+            it.copy(
+                currentDestination = LauncherDestination.PLAY_HUB,
+                isGameSessionRunning = false,
+                showPauseMenuModal = false,
+                showInventoryModal = false
+            )
+        }
+    }
+
+    fun getDownloadedClientJarFile(): File? {
+        val verId = _uiState.value.selectedVersion?.id ?: return null
+        return File(appContext.filesDir, "minecraft/versions/$verId/$verId.jar")
+    }
+
+    fun notifyMojangTextureSourceResolved(fromMojangJar: Boolean) {
+        _uiState.update { it.copy(loadedMojangJarTextures = fromMojangJar) }
     }
 
     fun toggleDynamicMaterialYou(enabled: Boolean) {
@@ -221,7 +267,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    // --- 2. PojavLauncher Core Execution & Game Session ---
+    // --- 2. PojavLauncher Core Execution & Full-Screen 3D Game Launch ---
 
     fun launchSelectedVanillaVersion() {
         val state = _uiState.value
@@ -241,6 +287,8 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                     prepareProgress = null,
                     currentDestination = LauncherDestination.GAME_SESSION,
                     isGameSessionRunning = true,
+                    showPauseMenuModal = false,
+                    showInventoryModal = false,
                     gameLogs = emptyList()
                 )
             }
@@ -291,43 +339,147 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { it.copy(showSessionConsoleDrawer = !it.showSessionConsoleDrawer) }
     }
 
-    // --- 3. Touch Controller & Layout Studio ---
+    fun selectHotbarSlot(slotIndex: Int) {
+        _uiState.update { it.copy(selectedHotbarSlot = slotIndex.coerceIn(0, 8)) }
+    }
+
+    fun assignBlockToActiveHotbar(blockType: VoxelBlockType) {
+        _uiState.update { state ->
+            val mutable = state.hotbarBlocks.toMutableList()
+            mutable[state.selectedHotbarSlot] = blockType
+            state.copy(hotbarBlocks = mutable, showInventoryModal = false)
+        }
+    }
+
+    fun togglePauseMenuModal(show: Boolean) {
+        _uiState.update { it.copy(showPauseMenuModal = show, showInventoryModal = false) }
+    }
+
+    fun toggleInventoryModal(show: Boolean) {
+        _uiState.update { it.copy(showInventoryModal = show, showPauseMenuModal = false) }
+    }
+
+    // --- 3. Touch Controller & 3D Voxel Gameplay Interaction ---
 
     fun onGlfwKeyEvent(binding: GlfwKeyBinding, pressed: Boolean) {
+        val renderer = activeGlRenderer
+
+        if (pressed) {
+            when (binding) {
+                GlfwKeyBinding.KEY_JUMP -> {
+                    renderer?.triggerJump()
+                }
+                GlfwKeyBinding.KEY_SNEAK -> {
+                    val nextSneak = !(renderer?.isSneaking ?: false)
+                    renderer?.isSneaking = nextSneak
+                }
+                GlfwKeyBinding.MOUSE_BREAK -> {
+                    if (renderer != null) {
+                        val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
+                        val hit = voxelWorld.raycast(
+                            renderer.playerX, eyeY, renderer.playerZ,
+                            renderer.cameraYaw, renderer.cameraPitch
+                        )
+                        if (hit != null && hit.blockType != VoxelBlockType.BEDROCK) {
+                            voxelWorld.setBlock(hit.blockX, hit.blockY, hit.blockZ, VoxelBlockType.AIR)
+                            _uiState.update {
+                                it.copy(targetedBlockInfo = "Разрушен: ${hit.blockType.displayName} (${hit.blockX}, ${hit.blockY}, ${hit.blockZ})")
+                            }
+                        }
+                    }
+                }
+                GlfwKeyBinding.MOUSE_PLACE -> {
+                    if (renderer != null) {
+                        val eyeY = renderer.playerY + if (renderer.isSneaking) 1.38f else 1.62f
+                        val hit = voxelWorld.raycast(
+                            renderer.playerX, eyeY, renderer.playerZ,
+                            renderer.cameraYaw, renderer.cameraPitch
+                        )
+                        if (hit != null) {
+                            val chosenBlock = _uiState.value.hotbarBlocks.getOrElse(_uiState.value.selectedHotbarSlot) {
+                                VoxelBlockType.COBBLESTONE
+                            }
+                            // Avoid placing block directly inside the player's body
+                            val pBlockX = kotlin.math.floor(renderer.playerX).toInt()
+                            val pBlockY = kotlin.math.floor(renderer.playerY).toInt()
+                            val pBlockZ = kotlin.math.floor(renderer.playerZ).toInt()
+                            val collidesWithPlayer = (hit.placeX == pBlockX && hit.placeZ == pBlockZ &&
+                                (hit.placeY == pBlockY || hit.placeY == pBlockY + 1))
+                            if (!collidesWithPlayer) {
+                                voxelWorld.setBlock(hit.placeX, hit.placeY, hit.placeZ, chosenBlock)
+                                _uiState.update {
+                                    it.copy(targetedBlockInfo = "Установлен: ${chosenBlock.displayName} (${hit.placeX}, ${hit.placeY}, ${hit.placeZ})")
+                                }
+                            }
+                        }
+                    }
+                }
+                GlfwKeyBinding.KEY_INVENTORY -> {
+                    _uiState.update { it.copy(showInventoryModal = !it.showInventoryModal, showPauseMenuModal = false) }
+                }
+                GlfwKeyBinding.KEY_PAUSE_ESC -> {
+                    _uiState.update { it.copy(showPauseMenuModal = !it.showPauseMenuModal, showInventoryModal = false) }
+                }
+                GlfwKeyBinding.KEY_THIRD_PERSON_F5 -> {
+                    val nextF5 = !_uiState.value.isThirdPersonView
+                    renderer?.thirdPersonMode = nextF5
+                    _uiState.update { it.copy(isThirdPersonView = nextF5) }
+                }
+                GlfwKeyBinding.KEY_DEBUG_F3 -> {
+                    _uiState.update { it.copy(showSessionDebugF3 = !it.showSessionDebugF3) }
+                }
+                GlfwKeyBinding.KEY_CHAT -> {
+                    _uiState.update { it.copy(showSessionConsoleDrawer = !it.showSessionConsoleDrawer) }
+                }
+                GlfwKeyBinding.KEY_PLAYER_LIST_TAB -> {
+                    renderer?.let { it.isNightTime = !it.isNightTime }
+                }
+                else -> {}
+            }
+        }
+
         _uiState.update { state ->
-            val nextF3 = if (binding == GlfwKeyBinding.KEY_DEBUG_F3 && pressed) {
-                !state.showSessionDebugF3
-            } else {
-                state.showSessionDebugF3
-            }
-            val nextConsole = if (binding == GlfwKeyBinding.KEY_CHAT && pressed) {
-                !state.showSessionConsoleDrawer
-            } else {
-                state.showSessionConsoleDrawer
-            }
             state.copy(
                 lastPressedGlfwKey = if (pressed) "${binding.keyName} [DOWN]" else "${binding.keyName} [UP]",
-                showSessionDebugF3 = nextF3,
-                showSessionConsoleDrawer = nextConsole
+                playerX = renderer?.playerX ?: state.playerX,
+                playerY = renderer?.playerY ?: state.playerY,
+                playerZ = renderer?.playerZ ?: state.playerZ
             )
         }
     }
 
     fun onAnalogMove(vx: Float, vy: Float) {
+        val renderer = activeGlRenderer
+        if (renderer != null) {
+            renderer.moveInputX = vx
+            renderer.moveInputY = vy
+        }
         _uiState.update {
             it.copy(
                 analogVectorX = vx,
                 analogVectorY = vy,
-                cameraYaw = (it.cameraYaw + vx * 1.4f) % 360f
+                playerX = renderer?.playerX ?: it.playerX,
+                playerY = renderer?.playerY ?: it.playerY,
+                playerZ = renderer?.playerZ ?: it.playerZ
             )
         }
     }
 
     fun onCameraLookDelta(dx: Float, dy: Float) {
+        val renderer = activeGlRenderer
+        val nextYaw = ((_uiState.value.cameraYaw + dx * 0.28f) % 360f + 360f) % 360f
+        val nextPitch = (_uiState.value.cameraPitch - dy * 0.22f).coerceIn(-85f, 85f)
+        if (renderer != null) {
+            renderer.cameraYaw = nextYaw
+            renderer.cameraPitch = nextPitch
+        }
         _uiState.update {
             it.copy(
-                cameraYaw = (it.cameraYaw + dx * 0.25f) % 360f,
-                cameraPitch = (it.cameraPitch - dy * 0.20f).coerceIn(-85f, 85f)
+                cameraYaw = nextYaw,
+                cameraPitch = nextPitch,
+                playerX = renderer?.playerX ?: it.playerX,
+                playerY = renderer?.playerY ?: it.playerY,
+                playerZ = renderer?.playerZ ?: it.playerZ
             )
         }
     }
@@ -414,10 +566,6 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
 
     fun toggleSkinOverlayLayer() {
         _uiState.update { it.copy(showSkinOverlay = !it.showSkinOverlay) }
-    }
-
-    fun toggleSkinGrid() {
-        _uiState.update { it.copy(showSkinGrid = !it.showSkinGrid) }
     }
 
     fun switchSkinFormat(format: SkinFormat) {

@@ -44,91 +44,91 @@ object ControllerProfileStorage {
         VirtualControlNode(
             id = "btn_jump",
             binding = GlfwKeyBinding.KEY_JUMP,
-            normalizedX = 0.86f,
+            normalizedX = 0.88f,
             normalizedY = 0.68f,
-            scale = 1.15f,
+            scale = 1.12f,
             opacity = 0.90f,
             isPrimaryAction = true
         ),
         VirtualControlNode(
             id = "btn_sneak",
             binding = GlfwKeyBinding.KEY_SNEAK,
-            normalizedX = 0.74f,
+            normalizedX = 0.77f,
             normalizedY = 0.78f,
-            scale = 1.0f,
+            scale = 0.98f,
             opacity = 0.85f,
             isStickyToggle = true
         ),
         VirtualControlNode(
             id = "btn_break",
             binding = GlfwKeyBinding.MOUSE_BREAK,
-            normalizedX = 0.75f,
-            normalizedY = 0.48f,
-            scale = 1.10f,
+            normalizedX = 0.77f,
+            normalizedY = 0.46f,
+            scale = 1.08f,
             opacity = 0.90f,
             isPrimaryAction = true
         ),
         VirtualControlNode(
             id = "btn_place",
             binding = GlfwKeyBinding.MOUSE_PLACE,
-            normalizedX = 0.88f,
-            normalizedY = 0.44f,
+            normalizedX = 0.89f,
+            normalizedY = 0.42f,
             scale = 1.05f,
             opacity = 0.88f
         ),
         VirtualControlNode(
             id = "btn_inv",
             binding = GlfwKeyBinding.KEY_INVENTORY,
-            normalizedX = 0.62f,
-            normalizedY = 0.84f,
-            scale = 0.95f,
+            normalizedX = 0.66f,
+            normalizedY = 0.82f,
+            scale = 0.94f,
+            opacity = 0.84f
+        ),
+        VirtualControlNode(
+            id = "btn_esc",
+            binding = GlfwKeyBinding.KEY_PAUSE_ESC,
+            normalizedX = 0.30f,
+            normalizedY = 0.09f,
+            scale = 0.84f,
             opacity = 0.82f
+        ),
+        VirtualControlNode(
+            id = "btn_tab",
+            binding = GlfwKeyBinding.KEY_PLAYER_LIST_TAB,
+            normalizedX = 0.38f,
+            normalizedY = 0.09f,
+            scale = 0.84f,
+            opacity = 0.78f
         ),
         VirtualControlNode(
             id = "btn_chat",
             binding = GlfwKeyBinding.KEY_CHAT,
-            normalizedX = 0.38f,
-            normalizedY = 0.12f,
-            scale = 0.90f,
-            opacity = 0.75f
+            normalizedX = 0.46f,
+            normalizedY = 0.09f,
+            scale = 0.84f,
+            opacity = 0.78f
         ),
         VirtualControlNode(
             id = "btn_f3",
             binding = GlfwKeyBinding.KEY_DEBUG_F3,
-            normalizedX = 0.48f,
-            normalizedY = 0.12f,
-            scale = 0.90f,
-            opacity = 0.75f,
+            normalizedX = 0.54f,
+            normalizedY = 0.09f,
+            scale = 0.84f,
+            opacity = 0.78f,
             isStickyToggle = true
         ),
         VirtualControlNode(
             id = "btn_f5",
             binding = GlfwKeyBinding.KEY_THIRD_PERSON_F5,
-            normalizedX = 0.58f,
-            normalizedY = 0.12f,
-            scale = 0.90f,
-            opacity = 0.75f
-        ),
-        VirtualControlNode(
-            id = "btn_tab",
-            binding = GlfwKeyBinding.KEY_PLAYER_LIST_TAB,
-            normalizedX = 0.28f,
-            normalizedY = 0.12f,
-            scale = 0.90f,
-            opacity = 0.75f
-        ),
-        VirtualControlNode(
-            id = "btn_esc",
-            binding = GlfwKeyBinding.KEY_PAUSE_ESC,
-            normalizedX = 0.12f,
-            normalizedY = 0.12f,
-            scale = 0.92f,
-            opacity = 0.80f
+            normalizedX = 0.62f,
+            normalizedY = 0.09f,
+            scale = 0.84f,
+            opacity = 0.78f
         )
     )
 
     fun loadLayout(filesDir: File): List<VirtualControlNode> {
-        val file = File(filesDir, "controller_layout_v1.json")
+        val file = File(filesDir, "controller_layout_v2.json")
         if (!file.exists()) return defaultLandscapeLayout()
         return runCatching {
             val arr = JSONArray(file.readText())
@@ -169,7 +169,7 @@ object ControllerProfileStorage {
                     }
                 )
             }
-            File(filesDir, "controller_layout_v1.json").writeText(arr.toString(2))
+            File(filesDir, "controller_layout_v2.json").writeText(arr.toString(2))
         }
     }
 }

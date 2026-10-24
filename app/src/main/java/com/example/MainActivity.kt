@@ -1,5 +1,6 @@
 package com.example
 
+import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -29,15 +30,20 @@ import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.AccountsAuthLandscapeScreen
@@ -58,6 +64,19 @@ class MainActivity : ComponentActivity() {
         setContent {
             val launcherViewModel: LauncherViewModel = viewModel()
             val state by launcherViewModel.uiState.collectAsStateWithLifecycle()
+            val view = LocalView.current
+
+            LaunchedEffect(state.currentDestination) {
+                val window = (view.context as? Activity)?.window ?: return@LaunchedEffect
+                val insetsController = WindowCompat.getInsetsController(window, view)
+                insetsController.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                if (state.currentDestination == LauncherDestination.GAME_SESSION) {
+                    insetsController.hide(WindowInsetsCompat.Type.systemBars())
+                } else {
+                    insetsController.show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
 
             MyApplicationTheme(useDynamicColor = state.useDynamicMaterialYou) {
                 MonolithLandscapeAppShell(
@@ -74,7 +93,29 @@ fun MonolithLandscapeAppShell(
     state: LauncherUiState,
     viewModel: LauncherViewModel
 ) {
-    // Handle system Back press on secondary screens
+    // When playing Minecraft Java (GAME_SESSION), completely exit the launcher UI shell
+    // and render the standalone full-screen 3D OpenGL ES game window.
+    if (state.currentDestination == LauncherDestination.GAME_SESSION) {
+        BackHandler {
+            if (state.showInventoryModal) {
+                viewModel.toggleInventoryModal(false)
+            } else if (state.showPauseMenuModal) {
+                viewModel.togglePauseMenuModal(false)
+            } else {
+                viewModel.togglePauseMenuModal(true)
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            GameSessionLandscapeScreen(state = state, viewModel = viewModel)
+        }
+        return
+    }
+
+    // Handle system Back press on secondary launcher screens
     BackHandler(enabled = state.currentDestination != LauncherDestination.PLAY_HUB) {
         viewModel.navigateTo(LauncherDestination.PLAY_HUB)
     }
@@ -91,7 +132,7 @@ fun MonolithLandscapeAppShell(
                 .padding(innerPadding)
                 .windowInsetsPadding(WindowInsets.safeDrawing)
         ) {
-            // Permanent Left NavigationRail for Landscape Ergonomics
+            // Permanent Left NavigationRail for Landscape Launcher Ergonomics
             NavigationRail(
                 containerColor = MaterialTheme.colorScheme.surface,
                 contentColor = MaterialTheme.colorScheme.onSurface,

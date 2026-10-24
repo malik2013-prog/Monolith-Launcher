@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.opengl.GLSurfaceView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -43,34 +44,36 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.example.LauncherDestination
 import com.example.LauncherUiState
 import com.example.LauncherViewModel
 import com.example.R
 import com.example.controller.TouchControllerOverlay
+import com.example.engine.MinecraftVoxelGlRenderer
+import com.example.engine.VoxelBlockType
 import com.example.pojavruntime.MinecraftVersion
 import com.example.pojavruntime.VanillaEra
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.SplashGold
-import kotlin.math.cos
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 @Composable
 fun PlayHubLandscapeScreen(
@@ -107,7 +110,6 @@ fun PlayHubLandscapeScreen(
                     .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
                     .padding(14.dp)
             ) {
-                // Brand Header + Bouncing Yellow Minecraft Splash Text
                 SplashBrandHeader(
                     splashQuote = state.splashQuote,
                     isRefreshing = state.isFetchingManifest,
@@ -117,7 +119,6 @@ fun PlayHubLandscapeScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Era Filter Chips (Vanilla Only: All, Release, Snapshot, Beta, Alpha, Infdev, Classic, Pre-Classic)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -145,11 +146,10 @@ fun PlayHubLandscapeScreen(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Compact Search Input
                 OutlinedTextField(
                     value = state.versionSearchQuery,
                     onValueChange = { viewModel.updateVersionSearchQuery(it) },
-                    placeholder = { Text("Поиск Vanilla версии (напр. 1.21.4, b1.7.3, a1.2.6, rd-132211)...", fontSize = 12.sp) },
+                    placeholder = { Text("Поиск Vanilla версии (напр. 1.21.4, 1.16.5, b1.7.3, a1.2.6)...", fontSize = 12.sp) },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -158,7 +158,6 @@ fun PlayHubLandscapeScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Version Catalog List
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
@@ -177,7 +176,7 @@ fun PlayHubLandscapeScreen(
             }
         }
 
-        // Right Column (46% width): Selected Version Spec + Pojav Core Routing + Launch Action
+        // Right Column (46% width): Selected Version Spec + Real Mojang Downloader + Launch Action
         Surface(
             modifier = Modifier
                 .weight(0.46f)
@@ -192,6 +191,9 @@ fun PlayHubLandscapeScreen(
                 selected?.recommendedJava ?: state.runtimeConfig.selectedJava
             } else {
                 state.runtimeConfig.selectedJava
+            }
+            val jarExists = remember(selected?.id, state.prepareProgress) {
+                viewModel.getDownloadedClientJarFile()?.let { it.exists() && it.length() > 100_000L } == true
             }
 
             Column(
@@ -214,7 +216,7 @@ fun PlayHubLandscapeScreen(
                     ) {
                         Column {
                             Text(
-                                text = "КОНФИГУРАЦИЯ ЗАПУСКА",
+                                text = "КОНФИГУРАЦИЯ ЗАПУСКА MOJANG",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = EmeraldPrimary
                             )
@@ -235,7 +237,6 @@ fun PlayHubLandscapeScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
-                        // Technical Matrix Card
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -248,15 +249,16 @@ fun PlayHubLandscapeScreen(
                             TechSpecRow("Среда OpenJDK", effectiveJava.title)
                             TechSpecRow("Рендерер GPU", state.runtimeConfig.renderer.title)
                             TechSpecRow("Пул памяти JVM", "-Xmx${state.runtimeConfig.allocatedMemoryMb}M (${state.runtimeConfig.gcAlgorithm.title})")
-                            TechSpecRow("Точка входа", selected.mainClass)
-                            TechSpecRow("SHA-1 Манифеста", selected.sha1.take(18) + "...")
+                            TechSpecRow(
+                                "Статус client.jar",
+                                if (jarExists) "Установлен (Mojang Official JAR)" else "Скачается с piston-data.mojang.com"
+                            )
                             TechSpecRow(
                                 "Активный профиль",
                                 "${activeAccount?.username ?: "Steve"} (${activeAccount?.mode?.badge ?: "Offline"})"
                             )
                         }
 
-                        // Quick Action Shortcuts
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -294,7 +296,6 @@ fun PlayHubLandscapeScreen(
                     }
                 }
 
-                // Asset Verification Progress & Launch Button
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -350,7 +351,11 @@ fun PlayHubLandscapeScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "ЗАПУСТИТЬ VANILLA ${selected?.id.orEmpty()}",
+                            text = if (jarExists) {
+                                "ИГРАТЬ В MINECRAFT ${selected?.id.orEmpty()}"
+                            } else {
+                                "СКАЧАТЬ И ЗАПУСТИТЬ ${selected?.id.orEmpty()}"
+                            },
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
                         )
@@ -423,7 +428,6 @@ private fun SplashBrandHeader(
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
-                // Authentic Bouncing Yellow Splash Quote
                 Text(
                     text = splashQuote,
                     color = SplashGold,
@@ -564,8 +568,8 @@ fun TechSpecRow(label: String, value: String) {
 }
 
 /**
- * Полноэкранная игровая сессия PojavLauncher Core с интерактивным рендером,
- * F3 телеметрией, вызываемой консолью latest.log и сенсорным контроллером.
+ * Полноэкранный автономный режим игры Minecraft Java 3D (OpenGL ES 2.0 + текстуры из скачанного Mojang client.jar).
+ * Лаунчер полностью скрывается, запуская настоящую 3D воксельную сцену с физикой, разрушением/установкой блоков и хотбаром.
  */
 @Composable
 fun GameSessionLandscapeScreen(
@@ -573,99 +577,56 @@ fun GameSessionLandscapeScreen(
     viewModel: LauncherViewModel,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val selectedVersion = state.selectedVersion
+    val clientJar = remember(selectedVersion?.id) { viewModel.getDownloadedClientJarFile() }
+
+    val glRenderer = remember(selectedVersion?.id) {
+        MinecraftVoxelGlRenderer(
+            world = viewModel.voxelWorld,
+            clientJarFile = clientJar,
+            onTextureSourceResolved = { fromMojang ->
+                viewModel.notifyMojangTextureSourceResolved(fromMojang)
+            }
+        )
+    }
+
+    DisposableEffect(glRenderer) {
+        viewModel.activeGlRenderer = glRenderer
+        onDispose {
+            if (viewModel.activeGlRenderer === glRenderer) {
+                viewModel.activeGlRenderer = null
+            }
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF090D10))
+            .background(Color.Black)
             .testTag("game_session_screen")
     ) {
-        // 1. Live Interactive Voxel World / GL4ES Viewport
+        // 1. Hardware-Accelerated 3D OpenGL ES 2.0 Voxel World View
+        AndroidView(
+            factory = { ctx ->
+                GLSurfaceView(ctx).apply {
+                    setEGLContextClientVersion(2)
+                    setRenderer(glRenderer)
+                    renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // 2. Center Crosshair (+)
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val horizonY = (size.height * (0.48f + (state.cameraPitch / 180f))).coerceIn(size.height * 0.15f, size.height * 0.85f)
-            // Sky gradient
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(Color(0xFF10253E), Color(0xFF1E3F66)),
-                    startY = 0f,
-                    endY = horizonY
-                ),
-                topLeft = Offset.Zero,
-                size = Size(size.width, horizonY)
-            )
-            // Ground voxel turf gradient
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(Color(0xFF1F5E34), Color(0xFF12351E)),
-                    startY = horizonY,
-                    endY = size.height
-                ),
-                topLeft = Offset(0f, horizonY),
-                size = Size(size.width, size.height - horizonY)
-            )
-
-            // Perspective grid lines reacting to WASD & Camera Yaw
-            val yawOffset = (state.cameraYaw % 45f) / 45f
-            for (i in -8..8) {
-                val topX = size.width / 2f + (i - yawOffset) * 28f
-                val bottomX = size.width / 2f + (i - yawOffset) * 190f
-                drawLine(
-                    color = Color(0x335CE08A),
-                    start = Offset(topX, horizonY),
-                    end = Offset(bottomX, size.height),
-                    strokeWidth = 1.5f
-                )
-            }
-
-            // Crosshair in center
             val cx = size.width / 2f
             val cy = size.height / 2f
-            drawLine(Color.White, Offset(cx - 10f, cy), Offset(cx + 10f, cy), strokeWidth = 2f)
-            drawLine(Color.White, Offset(cx, cy - 10f), Offset(cx, cy + 10f), strokeWidth = 2f)
+            drawLine(Color.White, Offset(cx - 11f, cy), Offset(cx + 11f, cy), strokeWidth = 2.2f)
+            drawLine(Color.White, Offset(cx, cy - 11f), Offset(cx, cy + 11f), strokeWidth = 2.2f)
         }
 
-        // 2. F3 Debug HUD (top-left)
-        AnimatedVisibility(
-            visible = state.showSessionDebugF3,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(12.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xAA0D1217))
-                    .padding(8.dp)
-            ) {
-                Text(
-                    text = "Minecraft ${selectedVersion?.id ?: "1.21.4"} (Monolith PojavCore / Vanilla)",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = EmeraldPrimary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "${state.runtimeConfig.targetFps} fps • ${state.runtimeConfig.renderer.title} • Mem: ${state.runtimeConfig.allocatedMemoryMb}MB",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = Color.White,
-                    fontSize = 10.sp
-                )
-                Text(
-                    text = "XYZ: ${(state.analogVectorX * 12f).roundToInt()} / 64 / ${(state.analogVectorY * 12f).roundToInt()} • Yaw/Pitch: ${state.cameraYaw.roundToInt()}° / ${state.cameraPitch.roundToInt()}°",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = Color(0xFF9AA8B6),
-                    fontSize = 10.sp
-                )
-                Text(
-                    text = "GLFW Input: ${state.lastPressedGlfwKey}",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = SplashGold,
-                    fontSize = 10.sp
-                )
-            }
-        }
-
-        // 3. Touch Controller Overlay
+        // 3. Touch Controller Overlay (WASD Analog Stick + Camera Look + Break/Place/Jump/Sneak/Inv/F3/F5/Esc)
         TouchControllerOverlay(
             nodes = state.controllerNodes,
             isEditMode = false,
@@ -678,52 +639,261 @@ fun GameSessionLandscapeScreen(
             onCameraLookDelta = { dx, dy -> viewModel.onCameraLookDelta(dx, dy) }
         )
 
-        // 4. Top-Right Session Controls (Console Log Drawer + AI Crash Test + Return)
+        // 4. Authentic 9-Slot Minecraft Hotbar at Bottom Center
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            val activeBlock = state.hotbarBlocks.getOrElse(state.selectedHotbarSlot) { VoxelBlockType.GRASS }
+            Text(
+                text = "${activeBlock.displayName}  •  ${state.targetedBlockInfo}",
+                fontFamily = JetBrainsMonoFontFamily,
+                fontSize = 11.sp,
+                color = Color.White,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0x99000000))
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xCC181818))
+                    .border(2.dp, Color(0xFF8B8B8B), RoundedCornerShape(6.dp))
+                    .padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                state.hotbarBlocks.forEachIndexed { index, block ->
+                    val isSelected = index == state.selectedHotbarSlot
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(if (isSelected) Color(0xFF424242) else Color(0xFF262626))
+                            .border(
+                                width = if (isSelected) 2.5.dp else 1.dp,
+                                color = if (isSelected) Color.White else Color(0xFF555555),
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                            .clickable { viewModel.selectHotbarSlot(index) }
+                            .testTag("hotbar_slot_$index"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Color(block.previewColor))
+                                .border(1.dp, Color(0x88000000), RoundedCornerShape(3.dp))
+                        )
+                        Text(
+                            text = "${index + 1}",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontSize = 9.sp,
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(start = 3.dp, top = 1.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 5. F3 Debug HUD (positioned below top bar so it NEVER overlaps ESC / TAB / CHAT / F3 / F5)
+        AnimatedVisibility(
+            visible = state.showSessionDebugF3,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 56.dp, start = 12.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xBB0B0F14))
+                    .padding(8.dp)
+            ) {
+                Text(
+                    text = "Minecraft ${selectedVersion?.id ?: "1.21.4"} (${selectedVersion?.mainClass ?: "Vanilla"} / OpenGL ES 2.0)",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    color = EmeraldPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Textures: ${if (state.loadedMojangJarTextures) "Mojang Official client.jar (Verified)" else "Built-in Vanilla 16x16 Atlas"}",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    color = SplashGold,
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = "XYZ: ${"%.1f".format(state.playerX)} / ${"%.1f".format(state.playerY)} / ${"%.1f".format(state.playerZ)}  •  Yaw/Pitch: ${state.cameraYaw.roundToInt()}° / ${state.cameraPitch.roundToInt()}°",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    color = Color.White,
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = "JVM Heap: -Xmx${state.runtimeConfig.allocatedMemoryMb}M (${state.runtimeConfig.renderer.title}) • Camera: ${if (state.isThirdPersonView) "3rd Person (F5)" else "1st Person"}",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    color = Color(0xFFB0BEC5),
+                    fontSize = 10.sp
+                )
+            }
+        }
+
+        // 6. Top-Right Quick Exit & Console Buttons
         Row(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(10.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             OutlinedButton(
                 onClick = { viewModel.toggleSessionConsoleDrawer() },
                 modifier = Modifier
-                    .height(34.dp)
+                    .height(32.dp)
                     .testTag("toggle_console_drawer_button")
             ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_console),
-                    contentDescription = "Консоль",
-                    modifier = Modifier.size(15.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("latest.log", fontSize = 11.sp, fontFamily = JetBrainsMonoFontFamily)
+                Text("Лог", fontSize = 11.sp, color = Color.White)
             }
-            OutlinedButton(
-                onClick = { viewModel.navigateTo(LauncherDestination.AI_ENGINEER) },
+            Button(
+                onClick = { viewModel.togglePauseMenuModal(true) },
                 modifier = Modifier
-                    .height(34.dp)
-                    .testTag("session_open_ai_analyzer_button")
-            ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_ai_spark),
-                    contentDescription = "AI Анализ",
-                    modifier = Modifier.size(15.dp),
-                    tint = SplashGold
+                    .height(32.dp)
+                    .testTag("open_game_menu_button"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xCC1E262E),
+                    contentColor = Color.White
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("AI Лог", fontSize = 11.sp)
+            ) {
+                Text("Меню (ESC)", fontSize = 11.sp)
             }
         }
 
-        // 5. Collapsible Live Console Log Drawer
+        // 7. Block Inventory Modal (INV / E)
+        AnimatedVisibility(
+            visible = state.showInventoryModal,
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(420.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xEE181E24))
+                    .border(2.dp, Color(0xFF8B8B8B), RoundedCornerShape(12.dp))
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "ИНВЕНТАРЬ БЛОКОВ VANILLA (Слот #${state.selectedHotbarSlot + 1})",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    fontSize = 13.sp
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    VoxelBlockType.entries.filter { it != VoxelBlockType.AIR }.forEach { blk ->
+                        Column(
+                            modifier = Modifier
+                                .width(76.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF262F38))
+                                .border(1.dp, EmeraldPrimary.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                .clickable { viewModel.assignBlockToActiveHotbar(blk) }
+                                .padding(8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(blk.previewColor))
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = blk.displayName,
+                                fontSize = 10.sp,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+                OutlinedButton(onClick = { viewModel.toggleInventoryModal(false) }) {
+                    Text("Закрыть инвентарь (E)", color = Color.White)
+                }
+            }
+        }
+
+        // 8. Authentic Minecraft Java Pause Menu Modal (ESC)
+        AnimatedVisibility(
+            visible = state.showPauseMenuModal,
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(340.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xEE12171C))
+                    .border(1.5.dp, Color(0xFF495867), RoundedCornerShape(12.dp))
+                    .padding(18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Game Menu — Minecraft ${selectedVersion?.id ?: "Vanilla"}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Button(
+                    onClick = { viewModel.togglePauseMenuModal(false) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = EmeraldPrimary,
+                        contentColor = Color(0xFF041A0C)
+                    )
+                ) {
+                    Text("Back to Game (Вернуться к игре)", fontWeight = FontWeight.Bold)
+                }
+                OutlinedButton(
+                    onClick = {
+                        viewModel.voxelWorld.generateVanillaTerrain()
+                        viewModel.togglePauseMenuModal(false)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Пересоздать чанки мира (New Seed)", color = Color.White, fontSize = 12.sp)
+                }
+                OutlinedButton(
+                    onClick = { viewModel.exitFullscreenGameToLauncher() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("quit_to_launcher_button")
+                ) {
+                    Text("Save & Quit to Launcher (Выйти в лаунчер)", color = SplashGold, fontSize = 12.sp)
+                }
+            }
+        }
+
+        // 9. Collapsible Live Console Log Drawer
         AnimatedVisibility(
             visible = state.showSessionConsoleDrawer,
             modifier = Modifier
-                .align(Alignment.BottomCenter)
+                .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .height(155.dp)
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .height(150.dp)
+                .padding(horizontal = 24.dp, vertical = 42.dp)
         ) {
             Column(
                 modifier = Modifier
@@ -745,26 +915,15 @@ fun GameSessionLandscapeScreen(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "[Тест OOM сбоя]",
-                            color = SplashGold,
-                            fontSize = 11.sp,
-                            fontFamily = JetBrainsMonoFontFamily,
-                            modifier = Modifier.clickable {
-                                viewModel.simulateCrashScenarioInLog("HEAP_OOM")
-                            }
-                        )
-                        Text(
-                            text = "[Закрыть]",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontFamily = JetBrainsMonoFontFamily,
-                            modifier = Modifier.clickable {
-                                viewModel.toggleSessionConsoleDrawer()
-                            }
-                        )
-                    }
+                    Text(
+                        text = "[Закрыть]",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        modifier = Modifier.clickable {
+                            viewModel.toggleSessionConsoleDrawer()
+                        }
+                    )
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -804,7 +963,6 @@ fun TouchControllerStudioScreen(
             .padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Left Interactive Viewport (64% width)
         Box(
             modifier = Modifier
                 .weight(0.64f)
@@ -843,7 +1001,6 @@ fun TouchControllerStudioScreen(
             )
         }
 
-        // Right Inspector Column (36% width)
         Surface(
             modifier = Modifier
                 .weight(0.36f)
