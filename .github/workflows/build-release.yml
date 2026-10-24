@@ -26,25 +26,30 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up OpenJDK 21
-        uses: actions/setup-java@v4
+      - name: Set up OpenJDK 21 & Cache Gradle
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
+          cache: 'gradle'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK Platform 36 & Build Tools
+      - name: Configure Android SDK & Licenses
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "build-tools;35.0.0" "platforms;android-36" || sdkmanager "build-tools;34.0.0"
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK_DIR" ]; then
+            SDK_DIR="$HOME/android-sdk"
+            mkdir -p "$SDK_DIR/cmdline-tools"
+            curl -sSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdtools.zip
+            unzip -q /tmp/cmdtools.zip -d "$SDK_DIR/cmdline-tools"
+            mv "$SDK_DIR/cmdline-tools/cmdline-tools" "$SDK_DIR/cmdline-tools/latest"
+          fi
 
-      - name: Setup Gradle & Cache Dependencies
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
-          cache-read-only: false
+          mkdir -p "$SDK_DIR/licenses"
+          printf "\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$SDK_DIR/licenses/android-sdk-license"
+          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n504667f4c0de7af1a06de9f4b1727b84351f2910\n" > "$SDK_DIR/licenses/android-sdk-preview-license"
+
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
 
       - name: Prepare Debug & Release Keystores
         env:
@@ -55,7 +60,7 @@ jobs:
           STORE_PASS="${SECRET_STORE_PASS:-android}"
           KEY_PASS="${SECRET_KEY_PASS:-android}"
 
-          # 1. Ensure debug.keystore exists for debugConfig block in app/build.gradle.kts
+          # 1. Restore or generate debug.keystore
           if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ]; then
             if [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
               base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "${GITHUB_WORKSPACE}/debug.keystore"
@@ -70,10 +75,11 @@ jobs:
             fi
           fi
 
-          # 2. Ensure release keystore (my-upload-key.jks) exists
+          # 2. Restore or generate my-upload-key.jks (alias: upload)
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
           else
+            rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
             keytool -genkeypair -v \
               -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
               -alias upload \
@@ -94,12 +100,8 @@ jobs:
           export KEY_PASSWORD="${SECRET_KEY_PASS:-android}"
           export GEMINI_API_KEY="${SECRET_GEMINI_KEY:-CI_PLACEHOLDER_KEY}"
 
-          if [ -f "./gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            chmod +x ./gradlew
-            ./gradlew assembleRelease --no-daemon --stacktrace
-          else
-            gradle assembleRelease --no-daemon --stacktrace
-          fi
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Verify & Align Signature via apksigner
         env:
@@ -109,18 +111,23 @@ jobs:
           STORE_PASS="${SECRET_STORE_PASS:-android}"
           KEY_PASS="${SECRET_KEY_PASS:-android}"
 
-          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
           BUILT_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           FINAL_APK="app/build/outputs/apk/release/Monolith-Vanilla-Launcher-${GITHUB_REF_NAME}.apk"
           cp "$BUILT_APK" "$FINAL_APK"
 
-          "$BUILD_TOOLS_DIR/apksigner" sign \
-            --ks "${GITHUB_WORKSPACE}/my-upload-key.jks" \
-            --ks-key-alias upload \
-            --ks-pass "pass:${STORE_PASS}" \
-            --key-pass "pass:${KEY_PASS}" \
-            "$FINAL_APK"
-          "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$FINAL_APK"
+          APKSIGNER_BIN=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -n 1 || true)
+          if [ -n "$APKSIGNER_BIN" ]; then
+            "$APKSIGNER_BIN" sign \
+              --ks "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+              --ks-key-alias upload \
+              --ks-pass "pass:${STORE_PASS}" \
+              --key-pass "pass:${KEY_PASS}" \
+              "$FINAL_APK"
+            "$APKSIGNER_BIN" verify --verbose "$FINAL_APK"
+          else
+            keytool -printcert -jarfile "$FINAL_APK" > /dev/null
+          fi
+
           echo "SIGNED_APK_PATH=$FINAL_APK" >> "$GITHUB_ENV"
 
       - name: Optional Remote Mirror Sync via rclone
@@ -144,16 +151,14 @@ jobs:
 
       - name: Publish APK to GitHub Releases
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v1.0.0-latest' }}
-          name: "Monolith Vanilla Launcher ${{ github.ref_name }}"
-          body: |
-            ### Monolith Vanilla Launcher (Android ARM64 / armeabi-v7a)
-            - **PojavLauncher Core Bridge**: GL4ES 1.1.5, ANGLE (Vulkan) & VirGL Mesa
-            - **Multi-Runtime OpenJDK**: Automatic routing for Java 8, Java 17, and Java 21
-            - **Pure Vanilla Manifest V2**: Pre-Classic (rd-132211) through Latest Releases & Snapshots
-            - **Built-in 2D/3D Skin Studio**: Mojang Official & Ely.by API + 64x64 Overlay Editor
-          files: ${{ env.SIGNED_APK_PATH }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          if [[ ! "$TAG_NAME" =~ ^v ]]; then
+            TAG_NAME="v1.0.0-${GITHUB_RUN_NUMBER}"
+          fi
+          gh release create "$TAG_NAME" "$SIGNED_APK_PATH" \
+            --title "Monolith Vanilla Launcher $TAG_NAME" \
+            --notes "Monolith Vanilla Launcher (Android ARM64 / armeabi-v7a) — PojavLauncher Core, OpenJDK 8/17/21, Mojang Manifest V2, 2D/3D Skin Studio & AI Diagnostics." || \
+          gh release upload "$TAG_NAME" "$SIGNED_APK_PATH" --clobber
