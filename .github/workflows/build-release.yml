@@ -2,6 +2,9 @@ name: Build & Sign Monolith Vanilla Launcher APK
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -29,23 +32,45 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Android SDK & Build Tools
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Cache Gradle Wrapper & Dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'gradle/libs.versions.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+      - name: Install Android SDK Platform 36 & Build Tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "build-tools;35.0.0" "platforms;android-36" || sdkmanager "build-tools;34.0.0"
 
-      - name: Prepare Keystore from GitHub Secrets
+      - name: Setup Gradle & Cache Dependencies
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          cache-read-only: false
+
+      - name: Prepare Debug & Release Keystores
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_STORE_PASS: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
+          STORE_PASS="${SECRET_STORE_PASS:-android}"
+          KEY_PASS="${SECRET_KEY_PASS:-android}"
+
+          # 1. Ensure debug.keystore exists for debugConfig block in app/build.gradle.kts
+          if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ]; then
+            if [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
+              base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "${GITHUB_WORKSPACE}/debug.keystore"
+            else
+              keytool -genkeypair -v \
+                -keystore "${GITHUB_WORKSPACE}/debug.keystore" \
+                -alias androiddebugkey \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "android" \
+                -keypass "android" \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+
+          # 2. Ensure release keystore (my-upload-key.jks) exists
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
           else
@@ -53,49 +78,63 @@ jobs:
               -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
               -alias upload \
               -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "${{ secrets.STORE_PASSWORD || 'android' }}" \
-              -keypass "${{ secrets.KEY_PASSWORD || 'android' }}" \
+              -storepass "$STORE_PASS" \
+              -keypass "$KEY_PASS" \
               -dname "CN=MonolithLauncher, OU=Android, O=VanillaCore, L=Stockholm, S=SE, C=SE"
           fi
-
-      - name: Grant Execute Permission for gradlew
-        run: chmod +x ./gradlew || true
 
       - name: Build Release APK (Multi-Module)
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD || 'android' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'android' }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || 'CI_PLACEHOLDER_KEY' }}
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+          SECRET_STORE_PASS: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+          SECRET_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          export STORE_PASSWORD="${SECRET_STORE_PASS:-android}"
+          export KEY_PASSWORD="${SECRET_KEY_PASS:-android}"
+          export GEMINI_API_KEY="${SECRET_GEMINI_KEY:-CI_PLACEHOLDER_KEY}"
+
+          if [ -f "./gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            gradle assembleRelease --no-daemon --stacktrace
+          fi
 
       - name: Verify & Align Signature via apksigner
         env:
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD || 'android' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'android' }}
+          SECRET_STORE_PASS: ${{ secrets.STORE_PASSWORD }}
+          SECRET_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
+          STORE_PASS="${SECRET_STORE_PASS:-android}"
+          KEY_PASS="${SECRET_KEY_PASS:-android}"
+
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
-          UNSIGNED_OR_REL_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          FINAL_APK="app/build/outputs/apk/release/Monolith-Vanilla-Launcher-${{ github.ref_name }}.apk"
-          cp "$UNSIGNED_OR_REL_APK" "$FINAL_APK"
+          BUILT_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          FINAL_APK="app/build/outputs/apk/release/Monolith-Vanilla-Launcher-${GITHUB_REF_NAME}.apk"
+          cp "$BUILT_APK" "$FINAL_APK"
+
           "$BUILD_TOOLS_DIR/apksigner" sign \
             --ks "${GITHUB_WORKSPACE}/my-upload-key.jks" \
             --ks-key-alias upload \
-            --ks-pass "pass:${STORE_PASSWORD}" \
-            --key-pass "pass:${KEY_PASSWORD}" \
+            --ks-pass "pass:${STORE_PASS}" \
+            --key-pass "pass:${KEY_PASS}" \
             "$FINAL_APK"
           "$BUILD_TOOLS_DIR/apksigner" verify --verbose "$FINAL_APK"
-          echo "SIGNED_APK_PATH=$FINAL_APK" >> $GITHUB_ENV
+          echo "SIGNED_APK_PATH=$FINAL_APK" >> "$GITHUB_ENV"
 
       - name: Optional Remote Mirror Sync via rclone
-        if: ${{ secrets.RCLONE_CONFIG != '' }}
         env:
           RCLONE_CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
         run: |
-          sudo apt-get update && sudo apt-get install -y rclone
-          mkdir -p ~/.config/rclone
-          echo "$RCLONE_CONFIG_CONTENT" > ~/.config/rclone/rclone.conf
-          rclone copy "$SIGNED_APK_PATH" remote:monolith-launcher-builds/${{ github.ref_name }}/ || true
+          if [ -n "$RCLONE_CONFIG_CONTENT" ]; then
+            sudo apt-get update && sudo apt-get install -y rclone
+            mkdir -p ~/.config/rclone
+            echo "$RCLONE_CONFIG_CONTENT" > ~/.config/rclone/rclone.conf
+            rclone copy "$SIGNED_APK_PATH" "remote:monolith-launcher-builds/${GITHUB_REF_NAME}/" || true
+          else
+            echo "RCLONE_CONFIG secret is not set; skipping remote mirror sync."
+          fi
 
       - name: Upload Signed APK Artifact
         uses: actions/upload-artifact@v4
