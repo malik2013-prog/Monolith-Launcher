@@ -1,0 +1,8 @@
+{
+  "name": "Monolith Launcher",
+  "description": "Landscape Vanilla Minecraft Launcher for Android powered by PojavLauncher Core, Mojang Manifest V2, custom Touch Controller, 2D/3D Skin Studio, and AI Diagnostics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

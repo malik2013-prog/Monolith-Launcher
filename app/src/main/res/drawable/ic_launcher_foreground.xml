@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Isometric Minimalist Voxel Cube inside 66dp safe zone (24..84) -->
+    <!-- Top Emerald Turf Face -->
+    <path
+        android:fillColor="#38C76A"
+        android:pathData="M54,26 L80,41 L54,56 L28,41 Z" />
+    <!-- Top Inner Pixel Highlight -->
+    <path
+        android:fillColor="#5CE08A"
+        android:pathData="M54,31 L72,41.5 L54,52 L36,41.5 Z" />
+    <!-- Left Basalt-Earth Face -->
+    <path
+        android:fillColor="#237A43"
+        android:pathData="M28,41 L54,56 L54,63 L28,48 Z" />
+    <path
+        android:fillColor="#3A4752"
+        android:pathData="M28,48 L54,63 L54,84 L28,69 Z" />
+    <!-- Right Shadowed Mineral Face -->
+    <path
+        android:fillColor="#1A5C32"
+        android:pathData="M54,56 L80,41 L80,48 L54,63 Z" />
+    <path
+        android:fillColor="#263038"
+        android:pathData="M54,63 L80,48 L80,69 L54,84 Z" />
+    <!-- Crisp Pixel Ore Accents on Faces -->
+    <path
+        android:fillColor="#38C76A"
+        android:pathData="M36,56 L42,59.5 L42,65.5 L36,62 Z" />
+    <path
+        android:fillColor="#FFD84D"
+        android:pathData="M62,62 L68,58.5 L68,64.5 L62,68 Z" />
+    <path
+        android:fillColor="#5CE08A"
+        android:pathData="M44,68 L49,71 L49,76 L44,73 Z" />
+</vector>

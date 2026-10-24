@@ -1,0 +1,6 @@
+{
+  "summary":  "Архитектурный и продуктовый план разработки горизонтального (Landscape) мобильного лаунчера Vanilla Minecraft на Android (PojavLauncher Core, Mojang Manifest V2, кастомный Touch Controller, 2D/3D редактор скинов Mojang/Ely.by, гибридные AI-ассистенты и CI/CD пайплайн).",
+  "updatedAt":  "2026-10-24T15:13:06.763326772Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
