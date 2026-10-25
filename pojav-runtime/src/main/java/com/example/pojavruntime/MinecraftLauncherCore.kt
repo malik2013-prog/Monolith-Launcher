@@ -172,8 +172,23 @@ class MinecraftLauncherCore(
         val versionJsonFile = File(versionDir, "${version.id}.json")
         val clientJarFile = File(versionDir, "${version.id}.jar")
         val librariesRootDir = File(minecraftRootDir, "libraries")
-        val nativesDir = File(versionDir, "natives").apply { mkdirs() }
+        val extNativesDir = File(versionDir, "natives").apply { mkdirs() }
+        val execNativesDir = File(filesDir, "exec_natives/${version.id}").apply { mkdirs() }
+        if (extNativesDir.exists()) {
+            extNativesDir.listFiles()?.forEach { f ->
+                if (f.isFile && f.name.endsWith(".so")) {
+                    val dst = File(execNativesDir, f.name)
+                    if (!dst.exists() || dst.length() != f.length()) {
+                        runCatching { f.copyTo(dst, overwrite = true) }
+                    }
+                    dst.setExecutable(true, false)
+                    dst.setReadable(true, false)
+                }
+            }
+        }
+        val nativesDir = if (execNativesDir.listFiles()?.isNotEmpty() == true) execNativesDir else extNativesDir
         val assetsDir = File(minecraftRootDir, "assets")
+        val tmpDir = File(filesDir, "tmp").apply { mkdirs() }
 
         val descriptor = if (versionJsonFile.exists() && versionJsonFile.length() > 64) {
             runCatching { downloader.parseVersionJsonFile(versionJsonFile, version.id) }.getOrNull()
@@ -200,14 +215,14 @@ class MinecraftLauncherCore(
         if (descriptor != null && descriptor.libraries.isNotEmpty()) {
             for (lib in descriptor.libraries) {
                 val jarFile = File(librariesRootDir, lib.mavenRelativePath)
-                if (jarFile.exists() && jarFile.length() > 0L) {
+                if (jarFile.exists() && jarFile.length() > 22L) {
                     classpathFiles.add(jarFile.absolutePath)
                 }
             }
         }
         if (classpathFiles.isEmpty() && librariesRootDir.exists()) {
             librariesRootDir.walkTopDown()
-                .filter { it.isFile && it.extension == "jar" && it.length() > 0L }
+                .filter { it.isFile && it.extension == "jar" && it.length() > 22L }
                 .forEach { classpathFiles.add(it.absolutePath) }
         }
         classpathFiles.add(clientJarFile.absolutePath)
@@ -226,7 +241,9 @@ class MinecraftLauncherCore(
         ).filter { it.exists() }.joinToString(File.pathSeparator) { it.absolutePath }
 
         val ldLibraryPath = buildString {
-            append(nativesDir.absolutePath)
+            append(execNativesDir.absolutePath)
+            append(File.pathSeparator)
+            append(extNativesDir.absolutePath)
             if (libJvmDir.isNotBlank()) {
                 append(File.pathSeparator)
                 append(libJvmDir)
@@ -236,7 +253,7 @@ class MinecraftLauncherCore(
         val env = linkedMapOf(
             "JAVA_HOME" to jreHome.absolutePath,
             "HOME" to minecraftRootDir.absolutePath,
-            "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath,
+            "TMPDIR" to tmpDir.absolutePath,
             "LD_LIBRARY_PATH" to ldLibraryPath,
             "PATH" to "${jreHome.absolutePath}/bin:${System.getenv("PATH").orEmpty()}",
             "POJAV_RENDERER" to runtimeConfig.renderer.envRendererValue,
@@ -255,9 +272,21 @@ class MinecraftLauncherCore(
         val jvmArgs = buildList {
             add("-Xms${(runtimeConfig.allocatedMemoryMb / 2).coerceAtLeast(512)}M")
             add("-Xmx${runtimeConfig.allocatedMemoryMb}M")
+            add("-XX:+UnlockExperimentalVMOptions")
+            add("-XX:+DisableExplicitGC")
             addAll(gcFlags)
+            if (effectiveJava.major >= 17) {
+                add("--add-opens=java.base/java.lang=ALL-UNNAMED")
+                add("--add-opens=java.base/java.io=ALL-UNNAMED")
+                add("--add-opens=java.base/java.nio=ALL-UNNAMED")
+                add("--add-opens=java.base/sun.nio.ch=ALL-UNNAMED")
+                add("--add-opens=java.base/java.util=ALL-UNNAMED")
+            }
             addAll(customFlags)
-            add("-Djava.library.path=${nativesDir.absolutePath}")
+            add("-Djava.io.tmpdir=${tmpDir.absolutePath}")
+            add("-Djava.awt.headless=true")
+            add("-Dfml.earlyprogresswindow=false")
+            add("-Djava.library.path=${nativesDir.absolutePath}${File.pathSeparator}${extNativesDir.absolutePath}")
             add("-Djna.boot.library.path=${nativesDir.absolutePath}")
             add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${nativesDir.absolutePath}")
             add("-Dio.netty.native.workdir=${nativesDir.absolutePath}")
@@ -265,7 +294,7 @@ class MinecraftLauncherCore(
             add("-Dorg.lwjgl.system.allocator=system")
             add("-Dlog4j2.formatMsgNoLookups=true")
             add("-Dminecraft.launcher.brand=monolith-vanilla")
-            add("-Dminecraft.launcher.version=2.0.0")
+            add("-Dminecraft.launcher.version=2.1.0")
             add("-cp")
             add(classpathString)
         }

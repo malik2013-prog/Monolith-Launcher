@@ -58,12 +58,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
 import com.example.LauncherUiState
 import com.example.LauncherViewModel
 import com.example.R
 import com.example.auth.AccountMode
 import com.example.pojavruntime.GcAlgorithm
 import com.example.pojavruntime.JavaRuntimeMajor
+import com.example.pojavruntime.LaunchCheckSeverity
 import com.example.pojavruntime.MobileGlRenderer
 import com.example.skineditor.SkinFormat
 import com.example.skineditor.SkinPreview3DViewport
@@ -74,6 +78,9 @@ import com.example.ui.theme.DangerRed
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.SplashGold
+import com.google.firebase.Firebase
+import com.google.firebase.auth.auth
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
@@ -377,7 +384,8 @@ fun SkinStudioLandscapeScreen(
 }
 
 /**
- * Двойной селектор аккаунтов: Официальный Microsoft / Xbox Live OAuth2 и Offline Mode (UUID v3).
+ * Двойной селектор аккаунтов: Официальный Microsoft / Xbox Live OAuth2 и Offline Mode (UUID v3) +
+ * Статус облачной синхронизации Firebase Auth (Google Sign-In).
  */
 @Composable
 fun AccountsAuthLandscapeScreen(
@@ -386,6 +394,8 @@ fun AccountsAuthLandscapeScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val firebaseUser = remember { Firebase.auth.currentUser }
     var selectedAuthTab by remember { mutableStateOf(AccountMode.OFFLINE_LOCAL) }
     var offlineNickInput by remember { mutableStateOf("VanillaBuilder") }
     var msaCodeInput by remember { mutableStateOf("") }
@@ -396,7 +406,7 @@ fun AccountsAuthLandscapeScreen(
             .padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Left Column (48%): Saved Profiles List
+        // Left Column (48%): Saved Profiles List + Cloud Auth Status
         Surface(
             modifier = Modifier
                 .weight(0.48f)
@@ -480,6 +490,47 @@ fun AccountsAuthLandscapeScreen(
                         }
                     }
                 }
+
+                // Cloud Google Sign-In Status Card
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .border(1.dp, EmeraldPrimary.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "ОБЛАЧНАЯ БАЗА ДАННЫХ FIREBASE (GOOGLE AUTH)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = SplashGold,
+                        fontSize = 10.sp
+                    )
+                    Text(
+                        text = "Аккаунт: ${firebaseUser?.email ?: firebaseUser?.displayName ?: firebaseUser?.uid ?: "Authorized"}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = 11.sp
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                runCatching {
+                                    CredentialManager.create(context)
+                                        .clearCredentialState(ClearCredentialStateRequest())
+                                }
+                                Firebase.auth.signOut()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(34.dp)
+                            .testTag("google_cloud_sign_out_button")
+                    ) {
+                        Text("Сменить Google аккаунт облачной БД", fontSize = 11.sp)
+                    }
+                }
+
                 if (state.authStatusMessage.isNotBlank()) {
                     Text(
                         text = state.authStatusMessage,
@@ -607,7 +658,10 @@ fun AccountsAuthLandscapeScreen(
 }
 
 /**
- * Практичные AI-функции: AI Crash & Log Analyzer (с исправлением в 1 клик) + AI Hardware Tuner (60/120 FPS).
+ * Практичные AI-функции:
+ * 1) Авто-инспектор и авто-исправление 8 критических ошибок запуска (PreLaunchDiagnosticInspector)
+ * 2) AI Crash & Log Analyzer (с исправлением в 1 клик)
+ * 3) AI Hardware Tuner (60/120 FPS)
  */
 @Composable
 fun AiEngineerLandscapeScreen(
@@ -617,6 +671,7 @@ fun AiEngineerLandscapeScreen(
 ) {
     val diag = state.crashDiagnosis
     val hw = state.hardwareProfile
+    val inspection = state.preLaunchInspection
 
     Row(
         modifier = modifier
@@ -624,10 +679,10 @@ fun AiEngineerLandscapeScreen(
             .padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Left Column (52%): AI Crash & Log Analyzer + 1-Click Fix
+        // Left Column (54%): Pre-Launch 8-Error Auto-Repair Inspector + AI Crash & Log Analyzer
         Surface(
             modifier = Modifier
-                .weight(0.52f)
+                .weight(0.54f)
                 .fillMaxHeight(),
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(14.dp)
@@ -646,24 +701,109 @@ fun AiEngineerLandscapeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "AI CRASH & LOG ANALYZER",
+                        text = "ИНСПЕКТОР И АВТО-ИСПРАВЛЕНИЕ ОШИБОК ЗАПУСКА",
                         style = MaterialTheme.typography.labelMedium,
                         color = EmeraldPrimary
                     )
                     Text(
-                        text = if (state.isGeminiKeyActive) "Hybrid: Local + Gemini 3.5 Flash" else "Local Deterministic Engine",
+                        text = "ARM64 + Firestore Sync",
                         style = MaterialTheme.typography.labelMedium,
                         color = SplashGold,
                         fontSize = 10.sp
                     )
                 }
 
+                Button(
+                    onClick = { viewModel.runPreLaunchDiagnosticAndRepair() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("run_prelaunch_diagnostic_repair_button"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = EmeraldPrimary,
+                        contentColor = Color(0xFF041A0C)
+                    )
+                ) {
+                    Text(
+                        text = "Проверить и устранить причины сбоя запуска (8 узлов)",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+
+                if (inspection != null) {
+                    val hasCritical = inspection.checks.any { it.severity == LaunchCheckSeverity.CRITICAL_WARNING }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .border(
+                                1.dp,
+                                if (hasCritical) DangerRed else EmeraldPrimary,
+                                RoundedCornerShape(10.dp)
+                            )
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Версия ${inspection.versionId}: авто-исправлено ${inspection.repairedIssuesCount} | статус: ${inspection.overallStatus} | RAM лимит: ${inspection.recommendedHeapMb} МБ",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = if (hasCritical) DangerRed else EmeraldPrimary
+                        )
+                        inspection.checks.forEach { item ->
+                            val badgeColor = when (item.severity) {
+                                LaunchCheckSeverity.OK -> EmeraldPrimary
+                                LaunchCheckSeverity.AUTO_REPAIRED -> SplashGold
+                                LaunchCheckSeverity.CRITICAL_WARNING -> DangerRed
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF0E141B))
+                                    .padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = item.title,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 11.sp,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = item.severity.name,
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontSize = 9.sp,
+                                        color = badgeColor
+                                    )
+                                }
+                                Text(
+                                    text = item.details,
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "Действие: ${item.actionTaken}",
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontSize = 9.sp,
+                                    color = badgeColor
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Real latest.log Disk Reader & Analyzer
                 Text(
-                    text = "Анализ реального лога сессии (logs/latest.log) и буфера консоли:",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp
+                    text = "AI CRASH & LOG ANALYZER (logs/latest.log):",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = EmeraldPrimary
                 )
                 OutlinedButton(
                     onClick = { viewModel.analyzeLatestLogFileFromDisk() },
@@ -741,10 +881,10 @@ fun AiEngineerLandscapeScreen(
             }
         }
 
-        // Right Column (48%): AI Hardware Tuner (RAM, Chipset, G1GC / ZGC for 60/120 FPS)
+        // Right Column (46%): AI Hardware Tuner (RAM, Chipset, G1GC / ZGC for 60/120 FPS)
         Surface(
             modifier = Modifier
-                .weight(0.48f)
+                .weight(0.46f)
                 .fillMaxHeight(),
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(14.dp)
@@ -830,7 +970,8 @@ fun AiEngineerLandscapeScreen(
 
 /**
  * Настройки среды исполнения PojavLauncher Core: Мульти-рантайм OpenJDK 8/17/21,
- * прослойки GL4ES / VirGL / ANGLE, пул ОЗУ и инспектор ProcessBuilder.
+ * прослойки GL4ES / VirGL / ANGLE, пул ОЗУ, инспектор ProcessBuilder и
+ * Облачная база данных профилей Firebase Firestore.
  */
 @Composable
 fun RuntimeSettingsLandscapeScreen(
@@ -839,6 +980,9 @@ fun RuntimeSettingsLandscapeScreen(
     modifier: Modifier = Modifier
 ) {
     val specPreview = viewModel.getCurrentLaunchSpecPreview()
+    var cloudProfileTitleInput by remember {
+        mutableStateOf("ARM64 ${state.selectedVersion?.id ?: "1.21.4"} Turbo")
+    }
 
     Row(
         modifier = modifier
@@ -945,7 +1089,7 @@ fun RuntimeSettingsLandscapeScreen(
             }
         }
 
-        // Right Column (50%): Memory Allocation, GC, Material You Dynamic Color & ProcessBuilder Preview
+        // Right Column (50%): Memory Allocation, Cloud Firestore DB Profiles & ProcessBuilder Preview
         Surface(
             modifier = Modifier
                 .weight(0.50f)
@@ -961,6 +1105,101 @@ fun RuntimeSettingsLandscapeScreen(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                Text(
+                    text = "ОБЛАЧНАЯ БАЗА ДАННЫХ ПРОФИЛЕЙ (FIRESTORE)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = SplashGold
+                )
+
+                Text(
+                    text = state.cloudSyncStatus,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = EmeraldPrimary,
+                    fontSize = 11.sp
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = cloudProfileTitleInput,
+                        onValueChange = { cloudProfileTitleInput = it },
+                        label = { Text("Название облачного профиля", fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cloud_profile_title_input")
+                    )
+                    Button(
+                        onClick = { viewModel.saveCurrentLaunchProfileToCloud(cloudProfileTitleInput) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = EmeraldPrimary,
+                            contentColor = Color(0xFF041A0C)
+                        ),
+                        modifier = Modifier.testTag("save_cloud_profile_button")
+                    ) {
+                        Text("Сохранить в БД", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    }
+                }
+
+                if (state.cloudLaunchProfiles.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        state.cloudLaunchProfiles.forEach { profile ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                                    .clickable { viewModel.applyCloudLaunchProfile(profile) }
+                                    .padding(8.dp)
+                                    .testTag("cloud_profile_item_${profile.id}"),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${profile.profileName} (${profile.versionId})",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
+                                    )
+                                    Text(
+                                        text = "Java ${profile.javaMajor} | ${profile.allocatedMemoryMb}MB | ${profile.gcAlgorithm} | ${profile.rendererId}",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { viewModel.deleteCloudLaunchProfile(profile.id) },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        painter = painterResource(id = R.drawable.ic_trash),
+                                        contentDescription = "Удалить профиль из БД",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (state.cloudDiagnosticReports.isNotEmpty()) {
+                    val latestReport = state.cloudDiagnosticReports.first()
+                    Text(
+                        text = "Последний отчет БД: ${latestReport.summary} (исправлено: ${latestReport.repairedIssuesCount})",
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontSize = 10.sp,
+                        color = SplashGold
+                    )
+                }
+
                 Text(
                     text = "ПАМЯТЬ JVM И РЕНДЕРИНГ",
                     style = MaterialTheme.typography.labelMedium,

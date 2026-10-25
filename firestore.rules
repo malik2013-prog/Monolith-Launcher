@@ -1,0 +1,121 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidLaunchProfile(data, uid) {
+      return data.userId is string && data.userId == uid &&
+             data.profileName is string && data.profileName.size() >= 1 && data.profileName.size() <= 80 &&
+             data.versionId is string && data.versionId.size() >= 1 && data.versionId.size() <= 64 &&
+             data.javaMajor is int && (data.javaMajor == 8 || data.javaMajor == 17 || data.javaMajor == 21) &&
+             data.allocatedMemoryMb is int && data.allocatedMemoryMb >= 512 && data.allocatedMemoryMb <= 16384 &&
+             data.rendererId is string && data.rendererId.size() >= 1 && data.rendererId.size() <= 64 &&
+             data.gcAlgorithm is string && data.gcAlgorithm.size() >= 1 && data.gcAlgorithm.size() <= 32 &&
+             data.customJvmFlags is string && data.customJvmFlags.size() <= 500 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidDiagnosticReport(data, uid) {
+      return data.userId is string && data.userId == uid &&
+             data.versionId is string && data.versionId.size() >= 1 && data.versionId.size() <= 64 &&
+             data.javaMajor is int && (data.javaMajor == 8 || data.javaMajor == 17 || data.javaMajor == 21) &&
+             data.totalChecks is int && data.totalChecks >= 1 && data.totalChecks <= 64 &&
+             data.repairedIssuesCount is int && data.repairedIssuesCount >= 0 && data.repairedIssuesCount <= 64 &&
+             data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 1000 &&
+             data.status is string && (data.status == 'READY' || data.status == 'REPAIRED' || data.status == 'ACTION_REQUIRED') &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/launch_profiles/{profileId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(profileId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(profileId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'profileName', 'versionId', 'javaMajor',
+                         'allocatedMemoryMb', 'rendererId', 'gcAlgorithm',
+                         'customJvmFlags', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'profileName', 'versionId', 'javaMajor',
+                         'allocatedMemoryMb', 'rendererId', 'gcAlgorithm',
+                         'customJvmFlags', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidLaunchProfile(incoming(), userId);
+
+      allow update: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(profileId) &&
+                       isValidLaunchProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'profileName', 'versionId', 'javaMajor',
+                         'allocatedMemoryMb', 'rendererId', 'gcAlgorithm',
+                         'customJvmFlags', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(profileId);
+    }
+
+    match /users/{userId}/diagnostic_reports/{reportId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(reportId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(reportId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'versionId', 'javaMajor', 'totalChecks',
+                         'repairedIssuesCount', 'summary', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'versionId', 'javaMajor', 'totalChecks',
+                         'repairedIssuesCount', 'summary', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidDiagnosticReport(incoming(), userId);
+
+      allow update: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(reportId) &&
+                       isValidDiagnosticReport(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'versionId', 'javaMajor', 'totalChecks',
+                         'repairedIssuesCount', 'summary', 'status', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(reportId);
+    }
+  }
+}

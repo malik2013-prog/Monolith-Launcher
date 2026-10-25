@@ -1,8 +1,9 @@
 package com.example
 
-import android.app.Application
+import android.content.Context
+import android.util.Log
 import android.view.Surface
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.GeminiHybridAssistant
 import com.example.auth.AuthAccountManager
@@ -10,6 +11,9 @@ import com.example.auth.MinecraftAccount
 import com.example.controller.ControllerProfileStorage
 import com.example.controller.GlfwKeyBinding
 import com.example.controller.VirtualControlNode
+import com.example.data.repository.CloudLaunchDatabaseRepository
+import com.example.data.repository.DiagnosticReportRecord
+import com.example.data.repository.LaunchProfileRecord
 import com.example.pojavruntime.AiCrashAndHardwareEngine
 import com.example.pojavruntime.AssetPrepareProgress
 import com.example.pojavruntime.CrashDiagnosis
@@ -26,6 +30,8 @@ import com.example.pojavruntime.MojangDownloader
 import com.example.pojavruntime.OneClickFixAction
 import com.example.pojavruntime.PojavLaunchSpec
 import com.example.pojavruntime.PojavNativeBridge
+import com.example.pojavruntime.PreLaunchDiagnosticInspector
+import com.example.pojavruntime.PreLaunchInspectionResult
 import com.example.pojavruntime.VanillaEra
 import com.example.skineditor.MojangAndElySkinClient
 import com.example.skineditor.ProceduralAiSkinSynthesizer
@@ -97,20 +103,30 @@ data class LauncherUiState(
     val skinStatusBanner: String = "Готов к редактированию 64×64 (Overlay включен)",
     val hardwareProfile: HardwareProfile? = null,
     val crashDiagnosis: CrashDiagnosis? = null,
+    val preLaunchInspection: PreLaunchInspectionResult? = null,
+    val isRunningPreLaunchCheck: Boolean = false,
+    val cloudLaunchProfiles: List<LaunchProfileRecord> = emptyList(),
+    val cloudDiagnosticReports: List<DiagnosticReportRecord> = emptyList(),
+    val cloudSyncStatus: String = "Подключено к облачной БД Firestore",
     val isAiAnalyzing: Boolean = false,
     val useDynamicMaterialYou: Boolean = false,
     val isGeminiKeyActive: Boolean = false
 )
 
-class LauncherViewModel(application: Application) : AndroidViewModel(application) {
+class LauncherViewModel(
+    context: Context,
+    private val cloudRepository: CloudLaunchDatabaseRepository,
+    val currentUserId: String
+) : ViewModel() {
 
-    private val appContext = application.applicationContext
+    private val appContext: Context = context.applicationContext
     val minecraftRootDir: File =
         appContext.getExternalFilesDir("minecraft") ?: File(appContext.filesDir, "minecraft").apply { mkdirs() }
 
     private val mojangDownloader = MojangDownloader()
     private val javaRuntimeManager = JavaRuntimeManager()
     private val launcherCore = MinecraftLauncherCore(mojangDownloader, javaRuntimeManager)
+    private val preLaunchInspector = PreLaunchDiagnosticInspector(appContext, minecraftRootDir, appContext.filesDir)
     private val aiEngine = AiCrashAndHardwareEngine()
     private val authManager = AuthAccountManager()
     private val skinClient = MojangAndElySkinClient()
@@ -171,6 +187,39 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }
 
         refreshMojangManifest()
+        startObservingCloudDatabase()
+        runPreLaunchDiagnosticAndRepair(saveToCloud = false)
+    }
+
+    private fun startObservingCloudDatabase() {
+        viewModelScope.launch {
+            cloudRepository.observeLaunchProfiles()
+                .catch { err ->
+                    Log.w("LauncherVM", "Error observing launch_profiles", err)
+                    _uiState.update {
+                        it.copy(cloudSyncStatus = "Ошибка синхронизации профилей: ${err.localizedMessage ?: "Firestore error"}")
+                    }
+                }
+                .collect { profiles ->
+                    _uiState.update {
+                        it.copy(
+                            cloudLaunchProfiles = profiles,
+                            cloudSyncStatus = "Облачная БД Firestore активна • Профилей: ${profiles.size}"
+                        )
+                    }
+                }
+        }
+        viewModelScope.launch {
+            cloudRepository.observeDiagnosticReports()
+                .catch { err ->
+                    Log.w("LauncherVM", "Error observing diagnostic_reports", err)
+                }
+                .collect { reports ->
+                    _uiState.update {
+                        it.copy(cloudDiagnosticReports = reports)
+                    }
+                }
+        }
     }
 
     private fun loadSplashesFromAssets(): List<String> {
@@ -394,11 +443,32 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 appContext.filesDir
             )
 
+            // 2.5. Автоматическая предпусковая диагностика и устранение 8 причин сбоя запуска
+            val inspection = preLaunchInspector.inspectAndRepairBeforeLaunch(
+                versionId = version.id,
+                javaMajor = requiredJava.major,
+                config = _uiState.value.runtimeConfig.copy(selectedJava = requiredJava),
+                onLog = ::appendLogLine
+            )
+            cloudRepository.saveDiagnosticReport(
+                versionId = version.id,
+                javaMajor = requiredJava.major,
+                totalChecks = inspection.checks.size,
+                repairedIssuesCount = inspection.repairedIssuesCount,
+                summary = "Авто-проверка перед запуском ${version.id}: исправлено ${inspection.repairedIssuesCount} узлов",
+                status = inspection.overallStatus
+            )
+
             // 3. Переход на экран с TextureView + Touch Overlay и запуск виртуальной машины Java
             _uiState.update {
                 it.copy(
                     prepareProgress = null,
                     mojangComponentsStatus = updatedStatus,
+                    preLaunchInspection = inspection,
+                    runtimeConfig = it.runtimeConfig.copy(
+                        selectedJava = requiredJava,
+                        allocatedMemoryMb = inspection.recommendedHeapMb
+                    ),
                     currentDestination = LauncherDestination.GAME_SESSION,
                     isGameSessionRunning = true,
                     showPauseMenuModal = false,
@@ -410,7 +480,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 filesDir = appContext.filesDir,
                 minecraftRootDir = minecraftRootDir,
                 version = version,
-                runtimeConfig = _uiState.value.runtimeConfig.copy(selectedJava = requiredJava),
+                runtimeConfig = _uiState.value.runtimeConfig,
                 username = activeAccount.username,
                 uuid = activeAccount.uuid,
                 accessToken = activeAccount.accessToken,
@@ -1033,6 +1103,109 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     fun updateResolutionScale(percent: Int) {
         _uiState.update { state ->
             state.copy(runtimeConfig = state.runtimeConfig.copy(resolutionScalePercent = percent.coerceIn(50, 100)))
+        }
+    }
+
+    // --- 7. Предпусковая диагностика (PreLaunchDiagnosticInspector) и Облачная БД Firestore ---
+
+    fun runPreLaunchDiagnosticAndRepair(saveToCloud: Boolean = true) {
+        val state = _uiState.value
+        val versionId = state.selectedVersion?.id ?: "1.21.4"
+        val javaMajor = state.mojangComponentsStatus.resolvedJavaMajor
+        viewModelScope.launch {
+            _uiState.update { it.copy(isRunningPreLaunchCheck = true) }
+            val result = preLaunchInspector.inspectAndRepairBeforeLaunch(
+                versionId = versionId,
+                javaMajor = javaMajor,
+                config = state.runtimeConfig,
+                onLog = ::appendLogLine
+            )
+            _uiState.update { cur ->
+                cur.copy(
+                    preLaunchInspection = result,
+                    isRunningPreLaunchCheck = false,
+                    runtimeConfig = cur.runtimeConfig.copy(allocatedMemoryMb = result.recommendedHeapMb)
+                )
+            }
+            if (saveToCloud) {
+                val summaryText = result.checks.joinToString("; ") { "${it.code}=${it.severity.name}" }
+                cloudRepository.saveDiagnosticReport(
+                    versionId = versionId,
+                    javaMajor = javaMajor,
+                    totalChecks = result.checks.size,
+                    repairedIssuesCount = result.repairedIssuesCount,
+                    summary = summaryText.take(950),
+                    status = result.overallStatus
+                ).onSuccess {
+                    appendLogLine("[Firestore/CloudDB]: Отчет предпусковой диагностики сохранен в облачную БД.")
+                }
+            }
+        }
+    }
+
+    fun saveCurrentLaunchProfileToCloud(customProfileName: String) {
+        val state = _uiState.value
+        val versionId = state.selectedVersion?.id ?: "1.21.4"
+        val javaMajor = if (state.runtimeConfig.autoSelectJava) {
+            state.mojangComponentsStatus.resolvedJavaMajor
+        } else {
+            state.runtimeConfig.selectedJava.major
+        }
+        val title = customProfileName.trim().ifBlank {
+            "Minecraft $versionId (${state.runtimeConfig.renderer.title})"
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(cloudSyncStatus = "Сохранение профиля «$title» в Firestore...") }
+            val res = cloudRepository.createLaunchProfile(
+                profileName = title,
+                versionId = versionId,
+                javaMajor = javaMajor,
+                allocatedMemoryMb = state.runtimeConfig.allocatedMemoryMb,
+                rendererId = state.runtimeConfig.renderer.id,
+                gcAlgorithm = state.runtimeConfig.gcAlgorithm.name,
+                customJvmFlags = state.runtimeConfig.customJvmFlags
+            )
+            res.onSuccess { docId ->
+                appendLogLine("[Firestore/CloudDB]: Сохранен профиль запуска «$title» (id=$docId)")
+                _uiState.update { it.copy(cloudSyncStatus = "Профиль «$title» сохранен в облачной БД") }
+            }.onFailure { err ->
+                _uiState.update {
+                    it.copy(cloudSyncStatus = "Ошибка сохранения в БД: ${err.localizedMessage ?: "отказ доступа"}")
+                }
+            }
+        }
+    }
+
+    fun applyCloudLaunchProfile(record: LaunchProfileRecord) {
+        val targetJava = JavaRuntimeMajor.fromMajor(record.javaMajor.toInt())
+        val targetRenderer = MobileGlRenderer.entries.firstOrNull { it.id == record.rendererId }
+            ?: MobileGlRenderer.GL4ES_114
+        val targetGc = GcAlgorithm.entries.firstOrNull { it.name == record.gcAlgorithm }
+            ?: GcAlgorithm.G1GC
+        val matchedVersion = _uiState.value.versions.firstOrNull { it.id == record.versionId }
+
+        _uiState.update { state ->
+            state.copy(
+                selectedVersion = matchedVersion ?: state.selectedVersion,
+                runtimeConfig = state.runtimeConfig.copy(
+                    autoSelectJava = false,
+                    selectedJava = targetJava,
+                    allocatedMemoryMb = record.allocatedMemoryMb.toInt().coerceIn(768, 6144),
+                    renderer = targetRenderer,
+                    gcAlgorithm = targetGc,
+                    customJvmFlags = record.customJvmFlags
+                ),
+                cloudSyncStatus = "Применен облачный профиль «${record.profileName}» (${record.versionId})"
+            )
+        }
+        appendLogLine("[Firestore/CloudDB]: Загружен профиль «${record.profileName}» -> ${record.versionId}, -Xmx${record.allocatedMemoryMb}M")
+    }
+
+    fun deleteCloudLaunchProfile(profileId: String) {
+        viewModelScope.launch {
+            cloudRepository.deleteLaunchProfile(profileId).onSuccess {
+                _uiState.update { it.copy(cloudSyncStatus = "Профиль удален из облачной БД Firestore") }
+            }
         }
     }
 }

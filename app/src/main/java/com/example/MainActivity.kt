@@ -46,15 +46,28 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.data.repository.CloudLaunchDatabaseRepository
 import com.example.ui.AccountsAuthLandscapeScreen
 import com.example.ui.AiEngineerLandscapeScreen
 import com.example.ui.GameSessionLandscapeScreen
+import com.example.ui.GoogleAuthGateScreen
 import com.example.ui.PlayHubLandscapeScreen
 import com.example.ui.RuntimeSettingsLandscapeScreen
 import com.example.ui.SkinStudioLandscapeScreen
 import com.example.ui.TouchControllerStudioScreen
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.MyApplicationTheme
+import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
+import com.google.firebase.firestore.FirebaseFirestore
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,27 +75,69 @@ class MainActivity : ComponentActivity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         enableEdgeToEdge()
         setContent {
-            val launcherViewModel: LauncherViewModel = viewModel()
-            val state by launcherViewModel.uiState.collectAsStateWithLifecycle()
-            val view = LocalView.current
+            val auth = remember { Firebase.auth }
+            var currentUser by remember { mutableStateOf(auth.currentUser) }
 
-            LaunchedEffect(state.currentDestination) {
-                val window = (view.context as? Activity)?.window ?: return@LaunchedEffect
-                val insetsController = WindowCompat.getInsetsController(window, view)
-                insetsController.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                if (state.currentDestination == LauncherDestination.GAME_SESSION) {
-                    insetsController.hide(WindowInsetsCompat.Type.systemBars())
-                } else {
-                    insetsController.show(WindowInsetsCompat.Type.systemBars())
+            DisposableEffect(auth) {
+                val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+                    currentUser = firebaseAuth.currentUser
+                }
+                auth.addAuthStateListener(listener)
+                onDispose {
+                    auth.removeAuthStateListener(listener)
                 }
             }
 
-            MyApplicationTheme(useDynamicColor = state.useDynamicMaterialYou) {
-                MonolithLandscapeAppShell(
-                    state = state,
-                    viewModel = launcherViewModel
+            if (currentUser == null) {
+                MyApplicationTheme(useDynamicColor = false) {
+                    GoogleAuthGateScreen(
+                        onAuthSuccess = {
+                            currentUser = Firebase.auth.currentUser
+                        }
+                    )
+                }
+            } else {
+                val activeUid = currentUser?.uid ?: "guest"
+                val appContext = applicationContext
+                val factory: ViewModelProvider.Factory = remember(activeUid) {
+                    viewModelFactory {
+                        initializer {
+                            val databaseId = appContext.getString(R.string.firestore_database_id)
+                            val firestore = FirebaseFirestore.getInstance(databaseId)
+                            val repository = CloudLaunchDatabaseRepository(firestore)
+                            LauncherViewModel(
+                                context = appContext,
+                                cloudRepository = repository,
+                                currentUserId = activeUid
+                            )
+                        }
+                    }
+                }
+                val launcherViewModel: LauncherViewModel = viewModel(
+                    key = "monolith_vm_$activeUid",
+                    factory = factory
                 )
+                val state by launcherViewModel.uiState.collectAsStateWithLifecycle()
+                val view = LocalView.current
+
+                LaunchedEffect(state.currentDestination) {
+                    val window = (view.context as? Activity)?.window ?: return@LaunchedEffect
+                    val insetsController = WindowCompat.getInsetsController(window, view)
+                    insetsController.systemBarsBehavior =
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    if (state.currentDestination == LauncherDestination.GAME_SESSION) {
+                        insetsController.hide(WindowInsetsCompat.Type.systemBars())
+                    } else {
+                        insetsController.show(WindowInsetsCompat.Type.systemBars())
+                    }
+                }
+
+                MyApplicationTheme(useDynamicColor = state.useDynamicMaterialYou) {
+                    MonolithLandscapeAppShell(
+                        state = state,
+                        viewModel = launcherViewModel
+                    )
+                }
             }
         }
     }

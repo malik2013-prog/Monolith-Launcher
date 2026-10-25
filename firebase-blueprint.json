@@ -1,0 +1,132 @@
+{
+  "entities": {
+    "LaunchProfileRecord": {
+      "title": "LaunchProfileRecord",
+      "description": "Cloud-persisted Minecraft Java launch configuration and JVM tuning profile owned by an authenticated user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the profile owner."
+        },
+        "profileName": {
+          "type": "string",
+          "description": "Human-readable name of the saved launch profile."
+        },
+        "versionId": {
+          "type": "string",
+          "description": "Minecraft Vanilla version identifier (e.g. 1.21.4, 1.16.5, b1.7.3)."
+        },
+        "javaMajor": {
+          "type": "integer",
+          "description": "Target OpenJDK major version (8, 17, or 21)."
+        },
+        "allocatedMemoryMb": {
+          "type": "integer",
+          "description": "Allocated JVM heap size in megabytes (-Xmx)."
+        },
+        "rendererId": {
+          "type": "string",
+          "description": "Mobile OpenGL/Vulkan renderer bridge identifier."
+        },
+        "gcAlgorithm": {
+          "type": "string",
+          "description": "JVM Garbage Collector algorithm identifier."
+        },
+        "customJvmFlags": {
+          "type": "string",
+          "description": "Custom JVM command-line arguments."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of profile creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last profile update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "profileName",
+        "versionId",
+        "javaMajor",
+        "allocatedMemoryMb",
+        "rendererId",
+        "gcAlgorithm",
+        "customJvmFlags",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DiagnosticReportRecord": {
+      "title": "DiagnosticReportRecord",
+      "description": "Pre-launch diagnostic check and automatic repair log entry stored in Firestore.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated Firebase UID of the report owner."
+        },
+        "versionId": {
+          "type": "string",
+          "description": "Target Minecraft version inspected before launch."
+        },
+        "javaMajor": {
+          "type": "integer",
+          "description": "Target OpenJDK major version verified."
+        },
+        "totalChecks": {
+          "type": "integer",
+          "description": "Number of pre-launch diagnostic checks executed."
+        },
+        "repairedIssuesCount": {
+          "type": "integer",
+          "description": "Number of launch-blocking issues automatically repaired."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Concise diagnostic summary of verified and repaired components."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["READY", "REPAIRED", "ACTION_REQUIRED"],
+          "description": "Resulting launch readiness status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when diagnostic report was recorded (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "versionId",
+        "javaMajor",
+        "totalChecks",
+        "repairedIssuesCount",
+        "summary",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/launch_profiles/{profileId}": {
+      "schema": { "$ref": "#/entities/LaunchProfileRecord" },
+      "description": "Per-user cloud collection of saved Minecraft Java launch configurations."
+    },
+    "/users/{userId}/diagnostic_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/DiagnosticReportRecord" },
+      "description": "Per-user cloud log of pre-launch diagnostics and auto-repairs."
+    }
+  }
+}
