@@ -1,24 +1,27 @@
 package com.example.pojavruntime
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -57,9 +60,19 @@ data class AssetObjectSpec(
 
 class MojangDownloader {
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val fastIoDispatcher = Dispatchers.IO.limitedParallelism(64)
+
+    private val httpDispatcher = Dispatcher().apply {
+        maxRequests = 128
+        maxRequestsPerHost = 64
+    }
+
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(90, TimeUnit.SECONDS)
+        .dispatcher(httpDispatcher)
+        .connectionPool(ConnectionPool(64, 5, TimeUnit.MINUTES))
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -70,6 +83,11 @@ class MojangDownloader {
             "https://resources.download.minecraft.net"
         const val LIBRARIES_BASE_URL =
             "https://libraries.minecraft.net"
+
+        private const val PARALLEL_CLIENT_CHUNKS = 6
+        private const val PARALLEL_LIBRARY_PERMITS = 24
+        private const val PARALLEL_ASSET_PERMITS = 48
+        private const val STREAM_BUFFER_SIZE = 128 * 1024
     }
 
     /**
@@ -139,7 +157,7 @@ class MojangDownloader {
 
                 val request = Request.Builder()
                     .url(VERSION_MANIFEST_V2_URL)
-                    .header("User-Agent", "MonolithLauncher/2.0 (Android; arm64-v8a)")
+                    .header("User-Agent", "MonolithLauncher/2.1 (Android; arm64-v8a; TurboPool)")
                     .build()
 
                 val rawJson = try {
@@ -393,12 +411,13 @@ class MojangDownloader {
     }
 
     /**
-     * Полный пайплайн скачивания официальных файлов Mojang на Coroutines Dispatchers.IO:
+     * Ускоренный многопоточный пайплайн скачивания официальных файлов Mojang:
      * а) versions/<id>/<id>.json
-     * б) versions/<id>/<id>.jar (с проверкой SHA-1)
-     * в) Все библиотеки из массива libraries в libraries/ по путям Maven (с проверкой rules и SHA-1)
-     * г) Индекс ассетов assets/indexes/<id>.json и многопоточная (Semaphore(16)) загрузка всех ресурсов в assets/objects/
+     * б) versions/<id>/<id>.jar (6 параллельных HTTP Range-потоков + проверка SHA-1)
+     * в) Все библиотеки из массива libraries в libraries/ (Semaphore(24) + потоковый SHA-1 без двойного чтения диска)
+     * г) Индекс ассетов assets/indexes/<id>.json и турбо-загрузка ресурсов в assets/objects/ (Semaphore(48) + HTTP/2 пул)
      */
+    @OptIn(ExperimentalCoroutinesApi::class)
     fun downloadVersionComplete(
         version: MinecraftVersion,
         minecraftRootDir: File,
@@ -420,79 +439,95 @@ class MojangDownloader {
                 currentFile = "versions/${version.id}/${version.id}.json"
             )
         )
-        onLogLine("[MojangDownloader] GET ${version.manifestUrl}")
+        onLogLine("[MojangDownloader/Turbo] GET ${version.manifestUrl}")
 
         downloadSingleFileWithSha1(
             url = version.manifestUrl,
             targetFile = versionJsonFile,
             expectedSha1 = version.sha1,
+            expectedSizeBytes = 0L,
+            verifyExistingWithSha1 = true,
             onProgressBytes = { _, _ -> }
         )
 
         val descriptor = parseVersionJsonFile(versionJsonFile, version.id)
         onLogLine(
-            "[MojangDownloader] Распарсен ${version.id}.json: mainClass=${descriptor.mainClass}, " +
+            "[MojangDownloader/Turbo] Распарсен ${version.id}.json: mainClass=${descriptor.mainClass}, " +
                 "javaVersion=${descriptor.javaMajorVersion}, библиотек=${descriptor.libraries.size}, assetIndex=${descriptor.assetIndexId}"
         )
 
-        // --- ЭТАП Б: Скачивание оригинального client.jar с проверкой SHA-1 ---
+        // --- ЭТАП Б: Турбо-скачивание оригинального client.jar (6 параллельных потоков HTTP Range + SHA-1) ---
         val clientTotalMb = descriptor.clientJarSize / (1024f * 1024f)
         send(
             AssetPrepareProgress(
-                stageTitle = "Скачивание оригинального client.jar (${version.id})...",
+                stageTitle = "Турбо-загрузка client.jar (${version.id}, $PARALLEL_CLIENT_CHUNKS потоков)...",
                 progressFraction = 0.06f,
                 currentFile = "versions/${version.id}/${version.id}.jar",
                 downloadedMb = 0f,
                 totalMb = clientTotalMb
             )
         )
-        onLogLine("[MojangDownloader] Проверка/скачивание client.jar (${"%.2f".format(clientTotalMb)} МБ, SHA1=${descriptor.clientJarSha1})")
+        onLogLine(
+            "[MojangDownloader/Turbo] Скачивание client.jar (${"%.2f".format(clientTotalMb)} МБ, " +
+                "потоков=$PARALLEL_CLIENT_CHUNKS, SHA1=${descriptor.clientJarSha1})"
+        )
 
-        var lastClientEmitMs = 0L
-        downloadSingleFileWithSha1(
+        val lastClientEmitMs = AtomicLong(0L)
+        downloadClientJarTurbo(
             url = descriptor.clientJarUrl,
             targetFile = clientJarFile,
             expectedSha1 = descriptor.clientJarSha1,
+            expectedSizeBytes = descriptor.clientJarSize,
             onProgressBytes = { downloaded, total ->
                 val now = System.currentTimeMillis()
-                if (now - lastClientEmitMs > 120L || downloaded == total) {
-                    lastClientEmitMs = now
-                    val dlMb = downloaded / (1024f * 1024f)
-                    val totMb = (if (total > 0) total else descriptor.clientJarSize) / (1024f * 1024f)
-                    val frac = if (totMb > 0f) (dlMb / totMb).coerceIn(0f, 1f) else 0.5f
-                    trySend(
-                        AssetPrepareProgress(
-                            stageTitle = "Скачивание client.jar: ${"%.1f".format(dlMb)} / ${"%.1f".format(totMb)} МБ",
-                            progressFraction = 0.05f + frac * 0.25f,
-                            currentFile = "versions/${version.id}/${version.id}.jar",
-                            downloadedMb = dlMb,
-                            totalMb = totMb
+                val prev = lastClientEmitMs.get()
+                if (now - prev > 90L || downloaded == total) {
+                    if (lastClientEmitMs.compareAndSet(prev, now)) {
+                        val dlMb = downloaded / (1024f * 1024f)
+                        val totMb = (if (total > 0) total else descriptor.clientJarSize) / (1024f * 1024f)
+                        val frac = if (totMb > 0f) (dlMb / totMb).coerceIn(0f, 1f) else 0.5f
+                        trySend(
+                            AssetPrepareProgress(
+                                stageTitle = "Турбо client.jar: ${"%.1f".format(dlMb)} / ${"%.1f".format(totMb)} МБ",
+                                progressFraction = 0.05f + frac * 0.25f,
+                                currentFile = "versions/${version.id}/${version.id}.jar",
+                                downloadedMb = dlMb,
+                                totalMb = totMb
+                            )
                         )
-                    )
+                    }
                 }
             }
         )
-        onLogLine("[MojangDownloader] Верифицирован SHA-1 для versions/${version.id}/${version.id}.jar")
+        onLogLine("[MojangDownloader/Turbo] Верифицирован SHA-1 для versions/${version.id}/${version.id}.jar")
 
-        // --- ЭТАП В: Скачивание всех библиотек из массива libraries по путям Maven ---
+        // --- ЭТАП В: Параллельное скачивание всех библиотек Maven (Semaphore(24)) ---
         val totalLibs = descriptor.libraries.size.coerceAtLeast(1)
         val totalLibsBytes = descriptor.libraries.sumOf { it.sizeBytes }.coerceAtLeast(1L)
         val downloadedLibsBytes = AtomicLong(0L)
         val completedLibsCount = AtomicInteger(0)
-        val libSemaphore = Semaphore(8)
+        val libSemaphore = Semaphore(PARALLEL_LIBRARY_PERMITS)
+        val lastLibEmitMs = AtomicLong(0L)
 
-        onLogLine("[MojangDownloader] Синхронизация ${descriptor.libraries.size} Maven-библиотек в libraries/...")
+        // Предварительно создаем директории для всех библиотек без блокировки внутри корутин
+        descriptor.libraries
+            .mapNotNull { File(librariesRootDir, it.mavenRelativePath).parentFile }
+            .distinct()
+            .forEach { if (!it.exists()) it.mkdirs() }
+
+        onLogLine("[MojangDownloader/Turbo] Параллельная загрузка ${descriptor.libraries.size} Maven-библиотек ($PARALLEL_LIBRARY_PERMITS потока)...")
         coroutineScope {
             descriptor.libraries.map { lib ->
-                async(Dispatchers.IO) {
+                async(fastIoDispatcher) {
                     libSemaphore.withPermit {
                         val destFile = File(librariesRootDir, lib.mavenRelativePath)
-                        destFile.parentFile?.mkdirs()
 
                         downloadSingleFileWithSha1(
                             url = lib.downloadUrl,
                             targetFile = destFile,
                             expectedSha1 = lib.sha1,
+                            expectedSizeBytes = lib.sizeBytes,
+                            verifyExistingWithSha1 = false,
                             onProgressBytes = { _, _ -> }
                         )
 
@@ -504,27 +539,33 @@ class MojangDownloader {
                         val bytesNow = downloadedLibsBytes.addAndGet(
                             if (lib.sizeBytes > 0) lib.sizeBytes else destFile.length()
                         )
-                        val dlMb = bytesNow / (1024f * 1024f)
-                        val totMb = totalLibsBytes / (1024f * 1024f)
-                        val libFrac = doneCount.toFloat() / totalLibs.toFloat()
+                        val now = System.currentTimeMillis()
+                        val prev = lastLibEmitMs.get()
+                        if (now - prev > 80L || doneCount == totalLibs) {
+                            if (lastLibEmitMs.compareAndSet(prev, now)) {
+                                val dlMb = bytesNow / (1024f * 1024f)
+                                val totMb = totalLibsBytes / (1024f * 1024f)
+                                val libFrac = doneCount.toFloat() / totalLibs.toFloat()
 
-                        trySend(
-                            AssetPrepareProgress(
-                                stageTitle = "Библиотеки Maven ($doneCount/${descriptor.libraries.size})",
-                                progressFraction = 0.30f + libFrac * 0.30f,
-                                currentFile = "libraries/${lib.mavenRelativePath}",
-                                downloadedMb = dlMb,
-                                totalMb = totMb,
-                                sha1Verified = true
-                            )
-                        )
+                                trySend(
+                                    AssetPrepareProgress(
+                                        stageTitle = "Библиотеки Maven ($doneCount/${descriptor.libraries.size})",
+                                        progressFraction = 0.30f + libFrac * 0.30f,
+                                        currentFile = "libraries/${lib.mavenRelativePath}",
+                                        downloadedMb = dlMb,
+                                        totalMb = totMb,
+                                        sha1Verified = true
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }.awaitAll()
         }
-        onLogLine("[MojangDownloader] Все ${descriptor.libraries.size} библиотек проверены и сохранены в libraries/")
+        onLogLine("[MojangDownloader/Turbo] Все ${descriptor.libraries.size} библиотек проверены и сохранены в libraries/")
 
-        // --- ЭТАП Г: Скачивание индекса ассетов и многопоточная (Semaphore(16)) загрузка всех ресурсов ---
+        // --- ЭТАП Г: Индекс ассетов и турбо-загрузка объектов ресурсов (Semaphore(48) + Keep-Alive Pool) ---
         val assetIndexFile = File(assetsIndexesDir, "${descriptor.assetIndexId}.json")
         if (descriptor.assetIndexUrl.isNotBlank()) {
             send(
@@ -534,11 +575,13 @@ class MojangDownloader {
                     currentFile = "assets/indexes/${descriptor.assetIndexId}.json"
                 )
             )
-            onLogLine("[MojangDownloader] GET ${descriptor.assetIndexUrl}")
+            onLogLine("[MojangDownloader/Turbo] GET ${descriptor.assetIndexUrl}")
             downloadSingleFileWithSha1(
                 url = descriptor.assetIndexUrl,
                 targetFile = assetIndexFile,
                 expectedSha1 = descriptor.assetIndexSha1,
+                expectedSizeBytes = 0L,
+                verifyExistingWithSha1 = true,
                 onProgressBytes = { _, _ -> }
             )
         }
@@ -558,53 +601,65 @@ class MojangDownloader {
                     }
                 }
 
+                // Предварительно создаем все 256 hex-папок (00..ff) один раз, чтобы не вызывать mkdirs() тысячи раз
+                assetSpecs.map { it.hash.substring(0, 2) }
+                    .distinct()
+                    .forEach { prefix2 ->
+                        val dir = File(assetsObjectsDir, prefix2)
+                        if (!dir.exists()) dir.mkdirs()
+                    }
+
                 val totalAssets = assetSpecs.size.coerceAtLeast(1)
                 val totalAssetsBytes = assetSpecs.sumOf { it.sizeBytes }.coerceAtLeast(1L)
                 val downloadedAssetsBytes = AtomicLong(0L)
                 val completedAssets = AtomicInteger(0)
-                val assetSemaphore = Semaphore(16)
-                var lastAssetEmitMs = 0L
+                val assetSemaphore = Semaphore(PARALLEL_ASSET_PERMITS)
+                val lastAssetEmitMs = AtomicLong(0L)
 
                 onLogLine(
-                    "[MojangDownloader] Многопоточная загрузка ${assetSpecs.size} ассетов (Semaphore(16), " +
+                    "[MojangDownloader/Turbo] Турбо-загрузка ${assetSpecs.size} ассетов ($PARALLEL_ASSET_PERMITS потоков, " +
                         "${"%.1f".format(totalAssetsBytes / (1024f * 1024f))} МБ)..."
                 )
 
                 coroutineScope {
                     assetSpecs.map { spec ->
-                        async(Dispatchers.IO) {
-                            assetSemaphore.withPermit {
-                                val prefix2 = spec.hash.substring(0, 2)
-                                val objectFile = File(assetsObjectsDir, "$prefix2/${spec.hash}")
-                                objectFile.parentFile?.mkdirs()
+                        async(fastIoDispatcher) {
+                            val prefix2 = spec.hash.substring(0, 2)
+                            val objectFile = File(assetsObjectsDir, "$prefix2/${spec.hash}")
 
-                                val alreadyPresent = objectFile.exists() &&
-                                    (spec.sizeBytes <= 0L || objectFile.length() == spec.sizeBytes)
+                            val alreadyPresent = objectFile.exists() &&
+                                (spec.sizeBytes <= 0L || objectFile.length() == spec.sizeBytes) &&
+                                objectFile.length() > 0L
 
-                                if (!alreadyPresent) {
+                            if (!alreadyPresent) {
+                                assetSemaphore.withPermit {
                                     val resourceUrl = "$RESOURCES_BASE_URL/$prefix2/${spec.hash}"
                                     downloadSingleFileWithSha1(
                                         url = resourceUrl,
                                         targetFile = objectFile,
                                         expectedSha1 = spec.hash,
+                                        expectedSizeBytes = spec.sizeBytes,
+                                        verifyExistingWithSha1 = false,
                                         onProgressBytes = { _, _ -> }
                                     )
                                 }
+                            }
 
-                                val done = completedAssets.incrementAndGet()
-                                val bytesDone = downloadedAssetsBytes.addAndGet(
-                                    if (spec.sizeBytes > 0) spec.sizeBytes else objectFile.length()
-                                )
+                            val done = completedAssets.incrementAndGet()
+                            val bytesDone = downloadedAssetsBytes.addAndGet(
+                                if (spec.sizeBytes > 0) spec.sizeBytes else objectFile.length()
+                            )
 
-                                val now = System.currentTimeMillis()
-                                if (now - lastAssetEmitMs > 120L || done == totalAssets) {
-                                    lastAssetEmitMs = now
+                            val now = System.currentTimeMillis()
+                            val prev = lastAssetEmitMs.get()
+                            if (now - prev > 90L || done == totalAssets) {
+                                if (lastAssetEmitMs.compareAndSet(prev, now)) {
                                     val dlMb = bytesDone / (1024f * 1024f)
                                     val totMb = totalAssetsBytes / (1024f * 1024f)
                                     val assetFrac = done.toFloat() / totalAssets.toFloat()
                                     trySend(
                                         AssetPrepareProgress(
-                                            stageTitle = "Ассеты Mojang ($done/$totalAssets)",
+                                            stageTitle = "Турбо-ассеты Mojang ($done/$totalAssets)",
                                             progressFraction = 0.64f + assetFrac * 0.35f,
                                             currentFile = "assets/objects/$prefix2/${spec.hash} (${spec.resourceKey})",
                                             downloadedMb = dlMb,
@@ -617,7 +672,7 @@ class MojangDownloader {
                         }
                     }.awaitAll()
                 }
-                onLogLine("[MojangDownloader] Завершена проверка и скачивание всех $totalAssets объектов ресурсов.")
+                onLogLine("[MojangDownloader/Turbo] Завершена турбо-загрузка всех $totalAssets объектов ресурсов.")
             }
         }
 
@@ -632,33 +687,138 @@ class MojangDownloader {
                 completed = true
             )
         )
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(fastIoDispatcher)
 
     /**
-     * Скачивает один файл по HTTP с проверкой SHA-1 хэша. Если файл уже существует и его SHA-1 совпадает,
-     * повторное скачивание не требуется.
+     * Многопоточное скачивание крупного файла (client.jar) в 6 параллельных HTTP Range-потоков
+     * с автоматическим откатом на одиночный поток, если сервер не вернул 206 Partial Content.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun downloadClientJarTurbo(
+        url: String,
+        targetFile: File,
+        expectedSha1: String,
+        expectedSizeBytes: Long,
+        onProgressBytes: (Long, Long) -> Unit
+    ) {
+        if (url.isBlank()) return
+        targetFile.parentFile?.let { if (!it.exists()) it.mkdirs() }
+
+        if (targetFile.exists() && targetFile.length() > 100_000L) {
+            val sizeMatches = expectedSizeBytes <= 0L || targetFile.length() == expectedSizeBytes
+            if (sizeMatches && (expectedSha1.isBlank() || computeFileSha1(targetFile).equals(expectedSha1, ignoreCase = true))) {
+                onProgressBytes(targetFile.length(), targetFile.length())
+                return
+            }
+        }
+
+        if (expectedSizeBytes > 4 * 1024 * 1024L) {
+            val tempFile = File(targetFile.parentFile, "${targetFile.name}.turbo.part")
+            val rangeSucceeded = runCatching {
+                RandomAccessFile(tempFile, "rw").use { raf ->
+                    raf.setLength(expectedSizeBytes)
+                }
+                val chunkSize = (expectedSizeBytes + PARALLEL_CLIENT_CHUNKS - 1) / PARALLEL_CLIENT_CHUNKS
+                val totalDownloaded = AtomicLong(0L)
+
+                coroutineScope {
+                    (0 until PARALLEL_CLIENT_CHUNKS).map { idx ->
+                        val startByte = idx * chunkSize
+                        val endByte = ((idx + 1) * chunkSize - 1).coerceAtMost(expectedSizeBytes - 1)
+                        async(fastIoDispatcher) {
+                            val req = Request.Builder()
+                                .url(url)
+                                .header("User-Agent", "MonolithLauncher/2.1 (Android; arm64-v8a; TurboRange)")
+                                .header("Range", "bytes=$startByte-$endByte")
+                                .build()
+
+                            httpClient.newCall(req).execute().use { resp ->
+                                if (resp.code != 206) {
+                                    throw IllegalStateException("Range HTTP ${resp.code}")
+                                }
+                                val body = resp.body ?: throw IllegalStateException("Empty Range body")
+                                RandomAccessFile(tempFile, "rw").use { chunkRaf ->
+                                    chunkRaf.seek(startByte)
+                                    body.byteStream().use { input ->
+                                        val buf = ByteArray(STREAM_BUFFER_SIZE)
+                                        var read: Int
+                                        while (input.read(buf).also { read = it } != -1) {
+                                            chunkRaf.write(buf, 0, read)
+                                            val cur = totalDownloaded.addAndGet(read.toLong())
+                                            onProgressBytes(cur, expectedSizeBytes)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }.awaitAll()
+                }
+
+                if (expectedSha1.isNotBlank()) {
+                    val actualSha1 = computeFileSha1(tempFile)
+                    if (!actualSha1.equals(expectedSha1, ignoreCase = true)) {
+                        tempFile.delete()
+                        throw SecurityException("SHA-1 mismatch after Range download")
+                    }
+                }
+                if (targetFile.exists()) targetFile.delete()
+                if (!tempFile.renameTo(targetFile)) {
+                    tempFile.copyTo(targetFile, overwrite = true)
+                    tempFile.delete()
+                }
+                true
+            }.getOrElse {
+                tempFile.delete()
+                false
+            }
+
+            if (rangeSucceeded) return
+        }
+
+        // Fallback на потоковое скачивание с вычислением SHA-1 налету
+        downloadSingleFileWithSha1(
+            url = url,
+            targetFile = targetFile,
+            expectedSha1 = expectedSha1,
+            expectedSizeBytes = expectedSizeBytes,
+            verifyExistingWithSha1 = true,
+            onProgressBytes = onProgressBytes
+        )
+    }
+
+    /**
+     * Скачивает один файл по HTTP с вычислением SHA-1 хэша прямо в потоке записи (без повторного чтения с диска).
      */
     private fun downloadSingleFileWithSha1(
         url: String,
         targetFile: File,
         expectedSha1: String,
+        expectedSizeBytes: Long = 0L,
+        verifyExistingWithSha1: Boolean = false,
         onProgressBytes: (Long, Long) -> Unit
     ) {
         if (url.isBlank()) return
-        targetFile.parentFile?.mkdirs()
+        targetFile.parentFile?.let { if (!it.exists()) it.mkdirs() }
 
         if (targetFile.exists() && targetFile.length() > 0L) {
+            val sizeMatches = expectedSizeBytes > 0L && targetFile.length() == expectedSizeBytes
+            if (sizeMatches && !verifyExistingWithSha1) {
+                onProgressBytes(targetFile.length(), targetFile.length())
+                return
+            }
             if (expectedSha1.isBlank() || computeFileSha1(targetFile).equals(expectedSha1, ignoreCase = true)) {
                 onProgressBytes(targetFile.length(), targetFile.length())
                 return
             }
         }
 
-        val tempFile = File(targetFile.parentFile, "${targetFile.name}.part")
+        val tempFile = File(targetFile.parentFile, "${targetFile.name}.${Thread.currentThread().id}.part")
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "MonolithLauncher/2.0 (Android; arm64-v8a)")
+            .header("User-Agent", "MonolithLauncher/2.1 (Android; arm64-v8a; TurboPool)")
             .build()
+
+        val digest = if (expectedSha1.isNotBlank()) MessageDigest.getInstance("SHA-1") else null
 
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
@@ -669,20 +829,22 @@ class MojangDownloader {
             var bytesReadTotal = 0L
 
             body.byteStream().use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    val buffer = ByteArray(64 * 1024)
+                BufferedOutputStream(FileOutputStream(tempFile), STREAM_BUFFER_SIZE).use { output ->
+                    val buffer = ByteArray(STREAM_BUFFER_SIZE)
                     var read: Int
                     while (input.read(buffer).also { read = it } != -1) {
                         output.write(buffer, 0, read)
+                        digest?.update(buffer, 0, read)
                         bytesReadTotal += read
                         onProgressBytes(bytesReadTotal, totalLength)
                     }
+                    output.flush()
                 }
             }
         }
 
-        if (expectedSha1.isNotBlank()) {
-            val actualSha1 = computeFileSha1(tempFile)
+        if (digest != null && expectedSha1.isNotBlank()) {
+            val actualSha1 = digest.digest().joinToString("") { "%02x".format(it) }
             if (!actualSha1.equals(expectedSha1, ignoreCase = true)) {
                 tempFile.delete()
                 throw SecurityException(
@@ -724,7 +886,7 @@ class MojangDownloader {
     fun computeFileSha1(file: File): String {
         val digest = MessageDigest.getInstance("SHA-1")
         FileInputStream(file).use { fis ->
-            val buffer = ByteArray(32 * 1024)
+            val buffer = ByteArray(64 * 1024)
             var count: Int
             while (fis.read(buffer).also { count = it } != -1) {
                 digest.update(buffer, 0, count)

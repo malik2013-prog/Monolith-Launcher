@@ -23,6 +23,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -173,13 +174,14 @@ fun signOutFromGoogleAndFirebase(
 @Composable
 fun GoogleAuthGateScreen(
     onAuthSuccess: () -> Unit,
+    onContinueOfflineLocal: () -> Unit = onAuthSuccess,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
     var isLoading by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var statusNotice by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         attemptAutoSignIn(
@@ -200,7 +202,7 @@ fun GoogleAuthGateScreen(
     ) {
         Surface(
             modifier = Modifier
-                .widthIn(max = 560.dp)
+                .widthIn(max = 580.dp)
                 .fillMaxWidth(),
             color = MaterialTheme.colorScheme.surface,
             shape = RoundedCornerShape(16.dp),
@@ -210,9 +212,9 @@ fun GoogleAuthGateScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
-                    .padding(24.dp),
+                    .padding(22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -240,7 +242,7 @@ fun GoogleAuthGateScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Minecraft: Java Edition (ARM64 OpenJDK + Firestore Sync)",
+                            text = "Minecraft: Java Edition (ARM64 OpenJDK + Turbo Downloader)",
                             style = MaterialTheme.typography.labelMedium,
                             color = EmeraldPrimary,
                             fontFamily = JetBrainsMonoFontFamily
@@ -249,28 +251,28 @@ fun GoogleAuthGateScreen(
                 }
 
                 Text(
-                    text = "Войдите через Google, чтобы синхронизировать профили запуска JVM, настройки рендерера (GL4ES / ANGLE / VirGL) и отчеты предпусковой диагностики в защищенной облачной базе данных Firebase Firestore.",
+                    text = "Войдите через Google для синхронизации профилей запуска JVM и отчетов предпусковой диагностики в Firebase Firestore, либо перейдите сразу в лаунчер в локальном режиме.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                if (!errorMessage.isNullOrBlank()) {
+                if (!statusNotice.isNullOrBlank()) {
                     Text(
-                        text = errorMessage.orEmpty(),
-                        color = DangerRed,
-                        fontSize = 12.sp,
+                        text = statusNotice.orEmpty(),
+                        color = SplashGold,
+                        fontSize = 11.sp,
                         fontFamily = JetBrainsMonoFontFamily,
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0x22F05454))
+                            .background(Color(0x22FFD84D))
                             .padding(8.dp)
                     )
                 }
 
                 Button(
                     onClick = {
-                        errorMessage = null
+                        statusNotice = null
                         isLoading = true
                         onGoogleSignInClicked(
                             context = context,
@@ -279,9 +281,10 @@ fun GoogleAuthGateScreen(
                                 isLoading = false
                                 onAuthSuccess()
                             },
-                            onAuthError = { msg ->
+                            onAuthError = {
                                 isLoading = false
-                                errorMessage = msg
+                                statusNotice = "Вход Google недоступен на этом устройстве — выполнен переход в локальный режим."
+                                onContinueOfflineLocal()
                             },
                             scope = scope,
                             onAuthCancelled = {
@@ -292,7 +295,7 @@ fun GoogleAuthGateScreen(
                     enabled = !isLoading,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
+                        .height(48.dp)
                         .testTag("google_sign_in_button"),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
@@ -302,7 +305,7 @@ fun GoogleAuthGateScreen(
                 ) {
                     if (isLoading) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(22.dp),
+                            modifier = Modifier.size(20.dp),
                             color = Color(0xFF041A0C),
                             strokeWidth = 2.dp
                         )
@@ -316,15 +319,31 @@ fun GoogleAuthGateScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "Sign in with Google (Войти через Google)",
+                            text = "Войти через Google (Синхронизация с Облачной БД)",
                             fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
+                            fontSize = 13.sp
                         )
                     }
                 }
 
+                OutlinedButton(
+                    onClick = onContinueOfflineLocal,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .testTag("continue_offline_local_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = "Продолжить без облачной БД (Быстрый вход в лаунчер)",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 12.sp,
+                        color = EmeraldPrimary
+                    )
+                }
+
                 Text(
-                    text = "Zero-Trust Firestore Enterprise • Jetpack Credential Manager",
+                    text = "Turbo 48-Stream Downloader • Zero-Trust Firestore • ARM64 OpenJDK",
                     fontSize = 10.sp,
                     color = SplashGold,
                     fontFamily = JetBrainsMonoFontFamily

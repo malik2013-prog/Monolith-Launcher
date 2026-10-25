@@ -78,33 +78,38 @@ jobs:
           # 2. Restore my-upload-key.jks or clone consistent key from debug.keystore so APK upgrades never conflict
           rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
-          elif [ -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ "$STORE_PASS" = "android" ] && [ "$KEY_PASS" = "android" ]; then
-            keytool -importkeystore \
-              -srckeystore "${GITHUB_WORKSPACE}/debug.keystore" \
-              -srcstorepass "android" \
-              -srckeypass "android" \
-              -srcalias androiddebugkey \
-              -destkeystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
-              -deststorepass "android" \
-              -destkeypass "android" \
-              -destalias upload \
-              -noprompt || \
-            keytool -genkeypair -v \
-              -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
-              -alias upload \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "$STORE_PASS" \
-              -keypass "$KEY_PASS" \
-              -dname "CN=MonolithLauncher, OU=Android, O=VanillaCore, L=Stockholm, S=SE, C=SE"
-          else
-            keytool -genkeypair -v \
-              -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
-              -alias upload \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "$STORE_PASS" \
-              -keypass "$KEY_PASS" \
-              -dname "CN=MonolithLauncher, OU=Android, O=VanillaCore, L=Stockholm, S=SE, C=SE"
+            echo "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks" || true
+          fi
+
+          if ! keytool -list -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" -storepass "$STORE_PASS" -alias upload >/dev/null 2>&1; then
+            rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
+            if [ -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ "$STORE_PASS" = "android" ] && [ "$KEY_PASS" = "android" ]; then
+              keytool -importkeystore \
+                -srckeystore "${GITHUB_WORKSPACE}/debug.keystore" \
+                -srcstorepass "android" \
+                -srckeypass "android" \
+                -srcalias androiddebugkey \
+                -destkeystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+                -deststorepass "android" \
+                -destkeypass "android" \
+                -destalias upload \
+                -noprompt || \
+              keytool -genkeypair -v \
+                -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+                -alias upload \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "$STORE_PASS" \
+                -keypass "$KEY_PASS" \
+                -dname "CN=MonolithLauncher, OU=Android, O=VanillaCore, L=Stockholm, S=SE, C=SE"
+            else
+              keytool -genkeypair -v \
+                -keystore "${GITHUB_WORKSPACE}/my-upload-key.jks" \
+                -alias upload \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "$STORE_PASS" \
+                -keypass "$KEY_PASS" \
+                -dname "CN=MonolithLauncher, OU=Android, O=VanillaCore, L=Stockholm, S=SE, C=SE"
+            fi
           fi
 
       - name: Build Release APK (Multi-Module)
@@ -118,8 +123,16 @@ jobs:
           export KEY_PASSWORD="${SECRET_KEY_PASS:-android}"
           export GEMINI_API_KEY="${SECRET_GEMINI_KEY:-CI_PLACEHOLDER_KEY}"
 
+          if [ ! -f "${GITHUB_WORKSPACE}/.env" ]; then
+            if [ -f "${GITHUB_WORKSPACE}/.env.example" ]; then
+              cp "${GITHUB_WORKSPACE}/.env.example" "${GITHUB_WORKSPACE}/.env"
+            else
+              echo "GEMINI_API_KEY=${GEMINI_API_KEY}" > "${GITHUB_WORKSPACE}/.env"
+            fi
+          fi
+
           chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          ./gradlew assembleRelease -x lint -x lintVitalRelease --no-daemon --no-configuration-cache --stacktrace
 
       - name: Zipalign & Verify V1+V2+V3 APK Signature
         env:

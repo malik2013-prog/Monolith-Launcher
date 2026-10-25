@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val auth = remember { Firebase.auth }
             var currentUser by remember { mutableStateOf(auth.currentUser) }
+            var localOfflineBypass by remember { mutableStateOf(false) }
 
             DisposableEffect(auth) {
                 val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
@@ -88,16 +89,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            if (currentUser == null) {
+            if (currentUser == null && !localOfflineBypass) {
                 MyApplicationTheme(useDynamicColor = false) {
                     GoogleAuthGateScreen(
                         onAuthSuccess = {
                             currentUser = Firebase.auth.currentUser
+                        },
+                        onContinueOfflineLocal = {
+                            localOfflineBypass = true
                         }
                     )
                 }
             } else {
-                val activeUid = currentUser?.uid ?: "guest"
+                val activeUid = currentUser?.uid ?: "local_offline_user"
                 val appContext = applicationContext
                 val factory: ViewModelProvider.Factory = remember(activeUid) {
                     viewModelFactory {

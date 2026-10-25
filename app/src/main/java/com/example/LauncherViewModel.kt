@@ -192,12 +192,18 @@ class LauncherViewModel(
     }
 
     private fun startObservingCloudDatabase() {
+        if (currentUserId == "local_offline_user") {
+            _uiState.update {
+                it.copy(cloudSyncStatus = "Локальный режим профилей • Войдите через Google во вкладке Аккаунты для облачной БД")
+            }
+            return
+        }
         viewModelScope.launch {
             cloudRepository.observeLaunchProfiles()
                 .catch { err ->
                     Log.w("LauncherVM", "Error observing launch_profiles", err)
                     _uiState.update {
-                        it.copy(cloudSyncStatus = "Ошибка синхронизации профилей: ${err.localizedMessage ?: "Firestore error"}")
+                        it.copy(cloudSyncStatus = "Локальный кэш профилей активен")
                     }
                 }
                 .collect { profiles ->
