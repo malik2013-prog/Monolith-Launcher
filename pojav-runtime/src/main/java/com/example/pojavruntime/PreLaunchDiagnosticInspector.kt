@@ -66,36 +66,30 @@ class PreLaunchDiagnosticInspector(
         // 1. Check & Repair NOEXEC mount / JRE executable permissions in internal filesDir
         val jreDir = File(internalFilesDir, "runtimes/jre_$javaMajor")
         val binDir = File(jreDir, "bin")
-        val libDir = File(jreDir, "lib")
-        var chmodFixed = 0
-        if (jreDir.exists()) {
-            jreDir.walkTopDown().forEach { f ->
-                if (f.isFile && (f.parentFile?.name == "bin" || f.name.endsWith(".so") || f.name == "jspawnhelper")) {
-                    if (!f.canExecute()) {
-                        f.setExecutable(true, false)
-                        f.setReadable(true, false)
-                        chmodFixed++
-                    }
-                }
-            }
+        val javaBin = File(binDir, "java")
+        val wasJavaExecutableBefore = javaBin.exists() && javaBin.canExecute()
+        val chmodFixed = if (jreDir.exists()) {
+            JavaRuntimeManager().enforceExecutablePermissions(jreDir)
+        } else {
+            0
         }
-        if (chmodFixed > 0 || !binDir.exists()) {
+        if (!wasJavaExecutableBefore || !binDir.exists()) {
             repairedCount++
             items += PreLaunchCheckItem(
                 code = "NOEXEC_GUARD_AND_CHMOD",
                 title = "Защита от noexec и права chmod +x на OpenJDK $javaMajor",
                 severity = LaunchCheckSeverity.AUTO_REPAIRED,
-                details = "Внешние разделы Android монтируются с флагом MS_NOEXEC (ошибка EACCES=13).",
-                actionTaken = "Среда OpenJDK размещена во внутреннем filesDir; восстановлены права +x для $chmodFixed бинарных файлов."
+                details = "Отсутствие флага исполнения (+x) на bin/java вызывает ошибку Permission denied (error=13) при старте ProcessBuilder.",
+                actionTaken = "Программно выставлены права setExecutable(true, false), Os.chmod(0755) и chmod -R 755 для bin/java и $chmodFixed файлов JRE."
             )
-            onLog("[DIAGNOSTIC] [REPAIRED] Восстановлены права исполнения chmod +x ($chmodFixed файлов) в ${jreDir.absolutePath}")
+            onLog("[DIAGNOSTIC] [REPAIRED] Выставлены права исполнения chmod 755 ($chmodFixed файлов, bin/java canExecute=${javaBin.canExecute()}) в ${jreDir.absolutePath}")
         } else {
             items += PreLaunchCheckItem(
                 code = "NOEXEC_GUARD_AND_CHMOD",
                 title = "Исполняемый раздел OpenJDK $javaMajor (filesDir)",
                 severity = LaunchCheckSeverity.OK,
-                details = "Все бинарные файлы bin/java и lib/*.so находятся в разделе без noexec и имеют флаг +x.",
-                actionTaken = "Проверка пройдена"
+                details = "Бинарный файл bin/java и все файлы в bin/ и lib/ имеют права на выполнение (+x / 0755, проверено $chmodFixed файлов).",
+                actionTaken = "Проверка пройдена (bin/java canExecute=true)"
             )
         }
 

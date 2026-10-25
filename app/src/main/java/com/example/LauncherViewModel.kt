@@ -478,7 +478,7 @@ class LauncherViewModel(
                     currentDestination = LauncherDestination.GAME_SESSION,
                     isGameSessionRunning = true,
                     showPauseMenuModal = false,
-                    showSessionConsoleDrawer = true
+                    showSessionConsoleDrawer = false
                 )
             }
 
