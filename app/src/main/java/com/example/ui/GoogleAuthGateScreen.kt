@@ -71,13 +71,17 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    if (Firebase.auth.currentUser != null) {
+    if (runCatching { Firebase.auth.currentUser }.getOrNull() != null) {
         onAuthSuccess()
         return
     }
     val clientId = try {
         context.getString(R.string.default_web_client_id)
     } catch (e: Exception) {
+        onUnauthenticated()
+        return
+    }
+    if (clientId.isBlank() || clientId == "MISSING_GOOGLE_SERVICES_JSON") {
         onUnauthenticated()
         return
     }
@@ -124,6 +128,10 @@ fun onGoogleSignInClicked(
         onAuthError("Google Sign-In configuration missing: default_web_client_id not found")
         return
     }
+    if (clientId.isBlank() || clientId == "MISSING_GOOGLE_SERVICES_JSON") {
+        onAuthError("Google Sign-In configuration missing: default_web_client_id not configured")
+        return
+    }
 
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
     val request = GetCredentialRequest.Builder()
@@ -159,7 +167,7 @@ fun signOutFromGoogleAndFirebase(
     scope: CoroutineScope
 ) {
     val credentialManager = CredentialManager.create(context)
-    Firebase.auth.signOut()
+    runCatching { Firebase.auth.signOut() }
     scope.launch {
         try {
             credentialManager.clearCredentialState(ClearCredentialStateRequest())

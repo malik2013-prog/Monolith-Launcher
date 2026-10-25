@@ -395,7 +395,7 @@ fun AccountsAuthLandscapeScreen(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val firebaseUser = remember { Firebase.auth.currentUser }
+    val firebaseUser = remember { runCatching { Firebase.auth.currentUser }.getOrNull() }
     var selectedAuthTab by remember { mutableStateOf(AccountMode.OFFLINE_LOCAL) }
     var offlineNickInput by remember { mutableStateOf("VanillaBuilder") }
     var msaCodeInput by remember { mutableStateOf("") }
@@ -519,7 +519,7 @@ fun AccountsAuthLandscapeScreen(
                                     CredentialManager.create(context)
                                         .clearCredentialState(ClearCredentialStateRequest())
                                 }
-                                Firebase.auth.signOut()
+                                runCatching { Firebase.auth.signOut() }
                             }
                         },
                         modifier = Modifier

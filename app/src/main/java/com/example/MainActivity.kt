@@ -75,17 +75,17 @@ class MainActivity : ComponentActivity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         enableEdgeToEdge()
         setContent {
-            val auth = remember { Firebase.auth }
-            var currentUser by remember { mutableStateOf(auth.currentUser) }
-            var localOfflineBypass by remember { mutableStateOf(false) }
+            val auth = remember { runCatching { Firebase.auth }.getOrNull() }
+            var currentUser by remember { mutableStateOf(auth?.currentUser) }
+            var localOfflineBypass by remember { mutableStateOf(auth == null) }
 
             DisposableEffect(auth) {
                 val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
                     currentUser = firebaseAuth.currentUser
                 }
-                auth.addAuthStateListener(listener)
+                auth?.addAuthStateListener(listener)
                 onDispose {
-                    auth.removeAuthStateListener(listener)
+                    auth?.removeAuthStateListener(listener)
                 }
             }
 
@@ -93,7 +93,10 @@ class MainActivity : ComponentActivity() {
                 MyApplicationTheme(useDynamicColor = false) {
                     GoogleAuthGateScreen(
                         onAuthSuccess = {
-                            currentUser = Firebase.auth.currentUser
+                            currentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+                            if (currentUser == null) {
+                                localOfflineBypass = true
+                            }
                         },
                         onContinueOfflineLocal = {
                             localOfflineBypass = true
