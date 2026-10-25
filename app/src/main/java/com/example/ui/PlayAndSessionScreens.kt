@@ -672,6 +672,8 @@ fun GameSessionLandscapeScreen(
                         ) {
                             val surface = Surface(surfaceTexture)
                             activeSurface = surface
+                            com.example.pojavruntime.CallbackBridge.setupBridgeWindow(surface)
+                            com.example.pojavruntime.CallbackBridge.sendUpdateWindowSize(width, height)
                             viewModel.onTextureViewSurfaceReady(surface, width, height)
                         }
 
@@ -680,10 +682,12 @@ fun GameSessionLandscapeScreen(
                             width: Int,
                             height: Int
                         ) {
+                            com.example.pojavruntime.CallbackBridge.sendUpdateWindowSize(width, height)
                             viewModel.onTextureViewSurfaceSizeChanged(width, height)
                         }
 
                         override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                            com.example.pojavruntime.CallbackBridge.setupBridgeWindow(null)
                             viewModel.onTextureViewSurfaceDestroyed()
                             activeSurface?.release()
                             activeSurface = null
@@ -887,7 +891,7 @@ fun GameSessionLandscapeScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "POJAV JVM / JNI CONSOLE (latest.log)",
+                        text = "POJAV JNI CONSOLE (latestlog.txt)",
                         fontFamily = JetBrainsMonoFontFamily,
                         color = EmeraldPrimary,
                         fontSize = 11.sp,

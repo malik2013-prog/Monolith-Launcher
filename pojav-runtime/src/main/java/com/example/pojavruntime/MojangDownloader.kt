@@ -301,6 +301,12 @@ class MojangDownloader {
             val downloadsObj = libObj.optJSONObject("downloads")
             val artifactObj = downloadsObj?.optJSONObject("artifact")
 
+            // Фильтрация десктопных нативных библиотек (DLL / SO / DYLIB от Mojang не качаем,
+            // так как на Android используются собственные ARM64 нативки PojavLauncher)
+            if (isDesktopNativeLibrary(libObj, coord, artifactObj?.optString("path").orEmpty())) {
+                continue
+            }
+
             if (artifactObj != null) {
                 val relPath = artifactObj.optString("path").ifBlank { mavenCoordinatesToPath(coord) }
                 val url = artifactObj.optString("url").ifBlank { "$LIBRARIES_BASE_URL/$relPath" }
@@ -314,21 +320,22 @@ class MojangDownloader {
                             downloadUrl = url,
                             sha1 = sha1,
                             sizeBytes = size,
-                            isNativeLibrary = coord.contains("natives-linux") || coord.contains("natives-arm64")
+                            isNativeLibrary = false
                         )
                     )
                 }
             } else if (coord.isNotBlank()) {
                 val relPath = mavenCoordinatesToPath(coord)
                 val baseUrl = libObj.optString("url", "$LIBRARIES_BASE_URL/").trimEnd('/')
-                if (relPath.isNotBlank()) {
+                if (relPath.isNotBlank() && !isDesktopNativeLibrary(libObj, coord, relPath)) {
                     librariesList.add(
                         MavenLibraryArtifact(
                             coordinates = coord,
                             mavenRelativePath = relPath,
                             downloadUrl = "$baseUrl/$relPath",
                             sha1 = "",
-                            sizeBytes = 0L
+                            sizeBytes = 0L,
+                            isNativeLibrary = false
                         )
                     )
                 }
@@ -374,6 +381,26 @@ class MojangDownloader {
             gameArguments = gameArgs,
             jvmArguments = jvmArgs
         )
+    }
+
+    /**
+     * Исключает десктопные нативные библиотеки Mojang (DLL, SO, DYLIB, classifiers, natives-*),
+     * так как при запуске через PojavLauncher используются мобильные ARM64 нативки Pojav.
+     */
+    private fun isDesktopNativeLibrary(libObj: JSONObject, coord: String, relPath: String): Boolean {
+        if (libObj.has("natives")) return true
+        val downloadsObj = libObj.optJSONObject("downloads")
+        if (downloadsObj != null && downloadsObj.has("classifiers") && !downloadsObj.has("artifact")) {
+            return true
+        }
+        val lowerCoord = coord.lowercase()
+        val lowerPath = relPath.lowercase()
+        return lowerCoord.contains(":natives-") ||
+            lowerCoord.contains("-natives-") ||
+            lowerPath.contains("-natives-") ||
+            lowerPath.endsWith(".dll") ||
+            lowerPath.endsWith(".dylib") ||
+            lowerPath.endsWith(".so")
     }
 
     /**
@@ -527,13 +554,9 @@ class MojangDownloader {
                             targetFile = destFile,
                             expectedSha1 = lib.sha1,
                             expectedSizeBytes = lib.sizeBytes,
-                            verifyExistingWithSha1 = false,
+                            verifyExistingWithSha1 = true,
                             onProgressBytes = { _, _ -> }
                         )
-
-                        if (lib.isNativeLibrary && destFile.exists()) {
-                            extractNativeSoFromJar(destFile, nativesDir)
-                        }
 
                         val doneCount = completedLibsCount.incrementAndGet()
                         val bytesNow = downloadedLibsBytes.addAndGet(
@@ -859,27 +882,6 @@ class MojangDownloader {
         if (!tempFile.renameTo(targetFile)) {
             tempFile.copyTo(targetFile, overwrite = true)
             tempFile.delete()
-        }
-    }
-
-    private fun extractNativeSoFromJar(jarFile: File, nativesDir: File) {
-        runCatching {
-            ZipFile(jarFile).use { zip ->
-                val entries = zip.entries()
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement()
-                    if (!entry.isDirectory && entry.name.endsWith(".so")) {
-                        val outSo = File(nativesDir, File(entry.name).name)
-                        zip.getInputStream(entry).use { input ->
-                            FileOutputStream(outSo).use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                        outSo.setExecutable(true, false)
-                        outSo.setReadable(true, false)
-                    }
-                }
-            }
         }
     }
 

@@ -16,6 +16,7 @@ import com.example.data.repository.DiagnosticReportRecord
 import com.example.data.repository.LaunchProfileRecord
 import com.example.pojavruntime.AiCrashAndHardwareEngine
 import com.example.pojavruntime.AssetPrepareProgress
+import com.example.pojavruntime.CallbackBridge
 import com.example.pojavruntime.CrashDiagnosis
 import com.example.pojavruntime.GcAlgorithm
 import com.example.pojavruntime.HardwareProfile
@@ -29,6 +30,7 @@ import com.example.pojavruntime.MojangComponentsStatus
 import com.example.pojavruntime.MojangDownloader
 import com.example.pojavruntime.OneClickFixAction
 import com.example.pojavruntime.PojavLaunchSpec
+import com.example.pojavruntime.PojavLogger
 import com.example.pojavruntime.PojavNativeBridge
 import com.example.pojavruntime.PreLaunchDiagnosticInspector
 import com.example.pojavruntime.PreLaunchInspectionResult
@@ -161,12 +163,6 @@ class LauncherViewModel(
         )
         val hwProfile = aiEngine.inspectAndTuneHardware(appContext, placeholderVer, 120)
 
-        val initLogs = listOf(
-            "[MojangDownloader]: Инициализация каталога игры: ${minecraftRootDir.absolutePath}",
-            "[JavaRuntimeManager]: Каталог рантаймов OpenJDK: ${appContext.filesDir.resolve("runtimes").absolutePath}",
-            "[MinecraftLauncherCore]: Готов к загрузке https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-        )
-
         _uiState.update {
             it.copy(
                 splashQuote = splashes.randomOrNull() ?: "100% Pure Vanilla!",
@@ -175,7 +171,7 @@ class LauncherViewModel(
                 controllerNodes = initialController,
                 skinPixels = initialSkin,
                 hardwareProfile = hwProfile,
-                gameLogs = initLogs,
+                gameLogs = emptyList(),
                 runtimeConfig = it.runtimeConfig.copy(
                     allocatedMemoryMb = hwProfile.recommendedHeapMb,
                     renderer = hwProfile.recommendedRenderer,
@@ -186,9 +182,26 @@ class LauncherViewModel(
             )
         }
 
+        startObservingLatestLogFile()
         refreshMojangManifest()
         startObservingCloudDatabase()
         runPreLaunchDiagnosticAndRepair(saveToCloud = false)
+    }
+
+    private fun startObservingLatestLogFile() {
+        val latestLogFile = File(minecraftRootDir, "latestlog.txt")
+        viewModelScope.launch {
+            PojavLogger.observeLatestLogFile(latestLogFile).collect { realLine ->
+                _uiState.update { cur ->
+                    val currentLogs = cur.gameLogs
+                    if (currentLogs.lastOrNull() == realLine) {
+                        cur
+                    } else {
+                        cur.copy(gameLogs = (currentLogs + realLine).takeLast(300))
+                    }
+                }
+            }
+        }
     }
 
     private fun startObservingCloudDatabase() {
@@ -239,10 +252,8 @@ class LauncherViewModel(
     }
 
     private fun appendLogLine(line: String) {
-        _uiState.update { cur ->
-            val updatedLogs = (cur.gameLogs + line).takeLast(200)
-            cur.copy(gameLogs = updatedLogs)
-        }
+        val latestLogFile = File(minecraftRootDir, "latestlog.txt")
+        PojavLogger.appendToLog(latestLogFile, line)
     }
 
     fun cycleSplashQuote() {
@@ -509,13 +520,12 @@ class LauncherViewModel(
     }
 
     /**
-     * Привязывает реальный Surface из TextureView к нативному мосту PojavNativeBridge (libpojavexec.so).
+     * Привязывает нативный Surface из TextureView к JNI-мосту CallbackBridge.setupBridgeWindow(surface).
      */
     fun onTextureViewSurfaceReady(surface: Surface, width: Int, height: Int) {
         activeRenderSurface = surface
-        PojavNativeBridge.dispatchWindowSurfaceSafely(surface)
-        PojavNativeBridge.dispatchWindowSizeSafely(width, height)
-        appendLogLine("[TextureView/Surface]: Surface готов (${width}x${height}) -> передан в PojavNativeBridge.")
+        CallbackBridge.setupBridgeWindow(surface)
+        CallbackBridge.sendUpdateWindowSize(width, height)
         _uiState.update {
             it.copy(
                 surfaceWidth = width,
@@ -526,7 +536,7 @@ class LauncherViewModel(
     }
 
     fun onTextureViewSurfaceSizeChanged(width: Int, height: Int) {
-        PojavNativeBridge.dispatchWindowSizeSafely(width, height)
+        CallbackBridge.sendUpdateWindowSize(width, height)
         _uiState.update {
             it.copy(
                 surfaceWidth = width,
@@ -537,7 +547,7 @@ class LauncherViewModel(
 
     fun onTextureViewSurfaceDestroyed() {
         activeRenderSurface = null
-        PojavNativeBridge.dispatchWindowSurfaceSafely(null)
+        CallbackBridge.setupBridgeWindow(null)
         _uiState.update { it.copy(isSurfaceBound = false) }
     }
 
@@ -979,11 +989,12 @@ class LauncherViewModel(
 
     fun analyzeLatestLogFileFromDisk() {
         val ver = _uiState.value.selectedVersion ?: return
-        val latestLogFile = File(minecraftRootDir, "logs/latest.log")
-        val logContent = if (latestLogFile.exists() && latestLogFile.length() > 0L) {
-            latestLogFile.readText()
-        } else {
-            _uiState.value.gameLogs.joinToString("\n")
+        val latestLogTxt = File(minecraftRootDir, "latestlog.txt")
+        val fallbackLog = File(minecraftRootDir, "logs/latest.log")
+        val logContent = when {
+            latestLogTxt.exists() && latestLogTxt.length() > 0L -> latestLogTxt.readText()
+            fallbackLog.exists() && fallbackLog.length() > 0L -> fallbackLog.readText()
+            else -> _uiState.value.gameLogs.joinToString("\n")
         }
 
         val localDiag = aiEngine.analyzeLogOrCrash(

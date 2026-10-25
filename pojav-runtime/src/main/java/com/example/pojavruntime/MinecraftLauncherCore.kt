@@ -1,20 +1,14 @@
 package com.example.pojavruntime
 
-import android.os.Build
 import android.system.Os
 import android.view.Surface
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.withContext
-import java.io.BufferedReader
+import kotlinx.coroutines.launch
 import java.io.File
-import java.io.InputStreamReader
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 data class PojavLaunchSpec(
     val effectiveJava: JavaRuntimeMajor,
@@ -35,8 +29,8 @@ data class PojavLaunchSpec(
 )
 
 /**
- * Нативный JNI-мост для инициализации libpojavexec.so / dlopen, передачи Surface из TextureView,
- * запуска виртуальной машины OpenJDK (JNI_CreateJavaVM) и проброса ввода GLFW.
+ * Нативный JNI-мост для инициализации libpojavexec.so / dlopen, передачи Surface из TextureView
+ * через CallbackBridge.setupBridgeWindow(surface) и запуска виртуальной машины OpenJDK через JREUtils.launchJavaVM(...).
  */
 object PojavNativeBridge {
 
@@ -57,8 +51,7 @@ object PojavNativeBridge {
     }
 
     /**
-     * Динамическая подгрузка libpojavexec.so и графического бэкенда (libgl4es_114.so / libGLESv2_angle.so)
-     * по абсолютному пути, если они размещены в папке нативных библиотек рантайма.
+     * Динамическая подгрузка libpojavexec.so по абсолютному пути из директории нативных библиотек PojavLauncher.
      */
     fun tryLoadFromRuntimeDir(nativeLibDir: File, jreRootDir: File): Boolean {
         if (isNativeBridgeLoaded) return true
@@ -72,7 +65,7 @@ object PojavNativeBridge {
                 runCatching {
                     soFile.setReadable(true, false)
                     soFile.setExecutable(true, false)
-                    Os.chmod(soFile.absolutePath, 365) // 0555 read-only executable for Android 14+ DCL
+                    Os.chmod(soFile.absolutePath, 365) // 0555
                     System.load(soFile.absolutePath)
                     isNativeBridgeLoaded = true
                     return true
@@ -118,58 +111,37 @@ object PojavNativeBridge {
     external fun nativeSendWindowSize(width: Int, height: Int)
 
     fun dispatchWindowSurfaceSafely(surface: Surface?) {
-        PojavSurfaceEglSession.boundSurface = surface
-        if (isNativeBridgeLoaded) {
-            runCatching { nativeSetWindowSurface(surface) }
-        }
+        CallbackBridge.setupBridgeWindow(surface)
     }
 
     fun dispatchWindowSizeSafely(width: Int, height: Int) {
-        if (width > 0 && height > 0) {
-            PojavSurfaceEglSession.surfaceWidth = width
-            PojavSurfaceEglSession.surfaceHeight = height
-        }
-        if (isNativeBridgeLoaded) {
-            runCatching { nativeSendWindowSize(width, height) }
-        }
+        CallbackBridge.sendUpdateWindowSize(width, height)
     }
 
     fun dispatchKeySafely(keyCode: Int, pressed: Boolean) {
-        PojavSurfaceEglSession.onKeyState(keyCode, pressed)
-        if (isNativeBridgeLoaded) {
-            runCatching { nativeSendKey(keyCode, 0, if (pressed) 1 else 0, 0) }
-        }
+        CallbackBridge.sendKeycode(keyCode = keyCode, isDown = pressed)
     }
 
     fun dispatchCursorPosSafely(x: Float, y: Float) {
-        PojavSurfaceEglSession.onCursorDelta(x, y)
-        if (isNativeBridgeLoaded) {
-            runCatching { nativeSendCursorPos(x, y) }
-        }
+        CallbackBridge.sendCursorPos(x, y)
     }
 
     fun dispatchMouseButtonSafely(button: Int, pressed: Boolean) {
-        if (isNativeBridgeLoaded) {
-            runCatching { nativeSendMouseButton(button, if (pressed) 1 else 0, 0) }
-        }
+        CallbackBridge.sendMouseButton(button = button, isDown = pressed)
     }
 }
 
 /**
- * МОДУЛЬ 3 — ГЕНЕРАТОР АРГУМЕНТОВ И НАТИВНЫЙ МОСТ ЗАПУСКА (MinecraftLauncherCore.kt)
+ * МОДУЛЬ 3 — ГЕНЕРАТОР АРГУМЕНТОВ И НАТИВНЫЙ МОСТ ЗАПУСКА ПО ЯДРУ POJAVLAUNCHER (MinecraftLauncherCore.kt)
  */
 class MinecraftLauncherCore(
     private val downloader: MojangDownloader = MojangDownloader(),
     private val javaManager: JavaRuntimeManager = JavaRuntimeManager()
 ) {
 
-    @Volatile
-    private var activeProcess: Process? = null
-
     /**
      * Собирает реальный classpath из всех скачанных библиотек в libraries/ и versions/<id>/<id>.jar,
-     * формирует массивы аргументов JVM (-Xmx, GC-флаги из «AI Инженер», пути к natives и рендереру ANGLE/GL4ES)
-     * и аргументов игры (net.minecraft.client.main.Main, --username, --uuid, --version, --gameDir, --assetsDir, --assetIndex).
+     * формирует аргументы JVM и аргументы игры для передачи в JREUtils.launchJavaVM(...).
      */
     fun buildLaunchSpec(
         filesDir: File,
@@ -184,24 +156,7 @@ class MinecraftLauncherCore(
         val versionJsonFile = File(versionDir, "${version.id}.json")
         val clientJarFile = File(versionDir, "${version.id}.jar")
         val librariesRootDir = File(minecraftRootDir, "libraries")
-        val extNativesDir = File(versionDir, "natives").apply { mkdirs() }
-        val execNativesDir = File(filesDir, "exec_natives/${version.id}").apply { mkdirs() }
-        if (extNativesDir.exists()) {
-            extNativesDir.listFiles()?.forEach { f ->
-                if (f.isFile && f.name.endsWith(".so")) {
-                    val dst = File(execNativesDir, f.name)
-                    if (!dst.exists() || dst.length() != f.length()) {
-                        runCatching { f.copyTo(dst, overwrite = true) }
-                    }
-                    dst.setReadable(true, false)
-                    if (!dst.setExecutable(true, false)) {
-                        dst.setExecutable(true, true)
-                    }
-                    runCatching { Os.chmod(dst.absolutePath, 493) }
-                }
-            }
-        }
-        val nativesDir = if (execNativesDir.listFiles()?.isNotEmpty() == true) execNativesDir else extNativesDir
+        val pojavNativesDir = File(filesDir, "runtimes/pojav_natives").apply { mkdirs() }
         val assetsDir = File(minecraftRootDir, "assets")
         val tmpDir = File(filesDir, "tmp").apply {
             mkdirs()
@@ -231,26 +186,16 @@ class MinecraftLauncherCore(
             javaManager.enforceExecutablePermissions(jreHome)
         }
         val javaBinary = File(jreHome, "bin/java")
-        val bridgeLoaded = PojavNativeBridge.tryLoadFromRuntimeDir(nativesDir, jreHome)
+        val bridgeLoaded = PojavNativeBridge.tryLoadFromRuntimeDir(pojavNativesDir, jreHome)
 
-        // Собираем реальный список всех скачанных .jar библиотек из descriptor (или обходим libraries/)
-        val classpathFiles = LinkedHashSet<String>()
-        if (descriptor != null && descriptor.libraries.isNotEmpty()) {
-            for (lib in descriptor.libraries) {
-                val jarFile = File(librariesRootDir, lib.mavenRelativePath)
-                if (jarFile.exists() && jarFile.length() > 22L) {
-                    classpathFiles.add(jarFile.absolutePath)
-                }
-            }
-        }
-        if (classpathFiles.isEmpty() && librariesRootDir.exists()) {
-            librariesRootDir.walkTopDown()
-                .filter { it.isFile && it.extension == "jar" && it.length() > 22L }
-                .forEach { classpathFiles.add(it.absolutePath) }
-        }
-        classpathFiles.add(clientJarFile.absolutePath)
+        // Собираем строку classpath из всех скачанных библиотек (без десктопных нативных архивов) + client.jar
+        val classpathEntries = JREUtils.buildClasspathEntries(
+            librariesRootDir = librariesRootDir,
+            descriptor = descriptor,
+            clientJarFile = clientJarFile
+        )
+        val classpathString = classpathEntries.joinToString(File.pathSeparator)
 
-        val classpathString = classpathFiles.joinToString(File.pathSeparator)
         val resolvedMainClass = descriptor?.mainClass ?: version.mainClass
         val resolvedAssetIndex = descriptor?.assetIndexId ?: version.assetsIndex
         val rendererSoName = resolveRendererLibName(runtimeConfig.renderer)
@@ -264,9 +209,7 @@ class MinecraftLauncherCore(
         ).filter { it.exists() }.joinToString(File.pathSeparator) { it.absolutePath }
 
         val ldLibraryPath = buildString {
-            append(execNativesDir.absolutePath)
-            append(File.pathSeparator)
-            append(extNativesDir.absolutePath)
+            append(pojavNativesDir.absolutePath)
             if (libJvmDir.isNotBlank()) {
                 append(File.pathSeparator)
                 append(libJvmDir)
@@ -284,7 +227,6 @@ class MinecraftLauncherCore(
             "LIBGL_MIPMAP" to "3",
             "LIBGL_NORMALIZE" to "1",
             "LIBGL_NOERROR" to "1",
-            "MESA_GL_VERSION_OVERRIDE" to if (runtimeConfig.renderer == MobileGlRenderer.VIRGL_MESA) "3.3" else "2.1",
             "ANGLE_DEFAULT_PLATFORM" to "vulkan",
             "GLFW_SCALE_FACTOR" to "${runtimeConfig.resolutionScalePercent / 100f}"
         )
@@ -307,17 +249,15 @@ class MinecraftLauncherCore(
             }
             addAll(customFlags)
             add("-Djava.io.tmpdir=${tmpDir.absolutePath}")
-            add("-Djava.awt.headless=true")
+            add("-Djava.awt.headless=false")
             add("-Dfml.earlyprogresswindow=false")
-            add("-Djava.library.path=${nativesDir.absolutePath}${File.pathSeparator}${extNativesDir.absolutePath}")
-            add("-Djna.boot.library.path=${nativesDir.absolutePath}")
-            add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${nativesDir.absolutePath}")
-            add("-Dio.netty.native.workdir=${nativesDir.absolutePath}")
+            add("-Djava.library.path=${pojavNativesDir.absolutePath}")
+            add("-Djna.boot.library.path=${pojavNativesDir.absolutePath}")
+            add("-Dorg.lwjgl.system.SharedLibraryExtractPath=${pojavNativesDir.absolutePath}")
+            add("-Dio.netty.native.workdir=${pojavNativesDir.absolutePath}")
             add("-Dorg.lwjgl.opengl.libname=$rendererSoName")
             add("-Dorg.lwjgl.system.allocator=system")
             add("-Dlog4j2.formatMsgNoLookups=true")
-            add("-Dminecraft.launcher.brand=monolith-vanilla")
-            add("-Dminecraft.launcher.version=2.1.0")
             add("-cp")
             add(classpathString)
         }
@@ -331,7 +271,7 @@ class MinecraftLauncherCore(
             "--uuid", uuid,
             "--accessToken", accessToken.ifBlank { "0" },
             "--userType", "msa",
-            "--versionType", "Monolith-Vanilla"
+            "--versionType", "release"
         )
 
         val fullCommand = buildList {
@@ -346,9 +286,9 @@ class MinecraftLauncherCore(
             renderer = runtimeConfig.renderer,
             jreHomeDir = jreHome,
             javaBinaryFile = javaBinary,
-            nativesDir = nativesDir,
+            nativesDir = pojavNativesDir,
             gameDir = minecraftRootDir,
-            classpathEntries = classpathFiles.toList(),
+            classpathEntries = classpathEntries,
             classpathString = classpathString,
             jvmArguments = jvmArgs,
             mainClass = resolvedMainClass,
@@ -361,9 +301,9 @@ class MinecraftLauncherCore(
     }
 
     /**
-     * Передает Surface из TextureView и аргументы JVM в нативный мост libpojavexec.so (JNI)
-     * либо запускает реальный бинарник runtimes/jre_<version>/bin/java через ProcessBuilder
-     * после программного выставления прав на исполнение (setExecutable + Os.chmod + chmod 755).
+     * Привязывает нативный Surface через CallbackBridge.setupBridgeWindow(surface),
+     * запускает чтение реального файла `latestlog.txt` (PojavLogger) и передает аргументы
+     * в `JREUtils.launchJavaVM(...)` без каких-либо фейковых логов или тестового рендера.
      */
     fun launchMinecraftJvmSession(
         filesDir: File,
@@ -385,167 +325,42 @@ class MinecraftLauncherCore(
             accessToken = accessToken
         )
 
-        val logDir = File(minecraftRootDir, "logs").apply { mkdirs() }
-        val latestLogFile = File(logDir, "latest.log")
-        latestLogFile.writeText("")
+        val latestLogFile = File(minecraftRootDir, "latestlog.txt")
+        PojavLogger.begin(latestLogFile.absolutePath)
 
-        val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
-        fun ts(): String = timeFmt.format(Date())
-
-        suspend fun logLine(line: String) {
-            withContext(Dispatchers.IO) {
-                latestLogFile.appendText("$line\n")
-            }
-            send(line)
+        if (renderSurface != null && renderSurface.isValid) {
+            CallbackBridge.setupBridgeWindow(renderSurface)
         }
 
-        logLine("[${ts()}] [MinecraftLauncherCore/INFO]: Архитектура: ${Build.SUPPORTED_ABIS.joinToString(", ")}")
-        logLine("[${ts()}] [MinecraftLauncherCore/INFO]: Каталог игры: ${minecraftRootDir.absolutePath}")
-        logLine("[${ts()}] [MinecraftLauncherCore/INFO]: Каталог JRE: ${spec.jreHomeDir.absolutePath} (${spec.effectiveJava.title})")
-        logLine("[${ts()}] [MinecraftLauncherCore/INFO]: Графический мост: ${spec.renderer.title} (${resolveRendererLibName(spec.renderer)})")
-        logLine("[${ts()}] [MinecraftLauncherCore/INFO]: Элементов в Classpath: ${spec.classpathEntries.size} JAR-файлов")
-        logLine("[${ts()}] [MinecraftLauncherCore/INFO]: Main Class: ${spec.mainClass}")
-
-        // 1. Попытка запуска через JNI-мост libpojavexec.so, если он загружен в память процесса
-        if (spec.nativeBridgeLoaded) {
-            logLine("[${ts()}] [JNI/libpojavexec.so]: Нативный мост активен. Передача Surface и окружения...")
-            if (renderSurface != null && renderSurface.isValid) {
-                PojavNativeBridge.dispatchWindowSurfaceSafely(renderSurface)
-                logLine("[${ts()}] [JNI/libpojavexec.so]: Surface из TextureView успешно привязан к ANativeWindow.")
-            }
-            val envKeys = spec.environmentVariables.keys.toTypedArray()
-            val envVals = spec.environmentVariables.values.toTypedArray()
-            val rendererPath = File(spec.nativesDir, resolveRendererLibName(spec.renderer)).absolutePath
-            val setupCode = runCatching {
-                PojavNativeBridge.nativeSetupBridgeEnv(envKeys, envVals, rendererPath)
-            }.getOrElse { -1 }
-            logLine("[${ts()}] [JNI/libpojavexec.so]: nativeSetupBridgeEnv вернул код $setupCode")
-
-            val jvmExitCode = withContext(Dispatchers.IO) {
-                runCatching {
-                    PojavNativeBridge.nativeLaunchJvm(
-                        jreHomePath = spec.jreHomeDir.absolutePath,
-                        jvmArgs = spec.jvmArguments.toTypedArray(),
-                        mainClass = spec.mainClass,
-                        gameArgs = spec.gameArguments.toTypedArray()
-                    )
-                }.getOrElse { err ->
-                    logLine("[${ts()}] [JNI/ERROR]: Ошибка вызова nativeLaunchJvm: ${err.message}")
-                    -2
-                }
-            }
-            logLine("[${ts()}] [JNI/libpojavexec.so]: Виртуальная машина завершила работу с кодом $jvmExitCode")
-            return@channelFlow
-        }
-
-        // 2. Программно выставляем права на выполнение (executable flag) для java и всех файлов в bin/ и lib/
-        val chmodFilesCount = javaManager.enforceExecutablePermissions(spec.jreHomeDir)
-        if (spec.javaBinaryFile.exists()) {
-            spec.javaBinaryFile.setReadable(true, false)
-            if (!spec.javaBinaryFile.setExecutable(true, false)) {
-                spec.javaBinaryFile.setExecutable(true, true)
-            }
-            runCatching { Os.chmod(spec.javaBinaryFile.absolutePath, 493) } // 0755
-            runCatching {
-                ProcessBuilder("chmod", "755", spec.javaBinaryFile.absolutePath)
-                    .redirectErrorStream(true)
-                    .start()
-                    .waitFor(3, TimeUnit.SECONDS)
+        // Подключаем реальное потоковое чтение файла latestlog.txt
+        val logTailJob = launch {
+            PojavLogger.observeLatestLogFile(latestLogFile).collect { realLine ->
+                send(realLine)
             }
         }
 
-        logLine(
-            "[${ts()}] [JavaRuntimeManager/CHMOD]: Права +x (0755) выставлены для $chmodFilesCount файлов JRE " +
-                "(bin/java canExecute=${spec.javaBinaryFile.canExecute()})"
-        )
-
-        if (!spec.javaBinaryFile.exists()) {
-            logLine("[${ts()}] [JavaRuntimeManager/WARN]: Файл ${spec.javaBinaryFile.absolutePath} отсутствует — запуск встроенного EGL14 моста...")
-            PojavSurfaceEglSession.runHardwareGlSession(spec, renderSurface) { line ->
-                logLine("[${ts()}] $line")
-            }
-            return@channelFlow
-        }
-
-        // 3. Запуск реального бинарного файла runtimes/jre_<version>/bin/java через ProcessBuilder
-        logLine("[${ts()}] [ProcessBuilder/INFO]: Запуск процесса ${spec.javaBinaryFile.absolutePath}...")
-
-        var fallbackToInProcessBridge = false
         try {
-            val pb = ProcessBuilder(spec.commandArgs)
-            pb.directory(minecraftRootDir)
-            pb.redirectErrorStream(true)
-            pb.environment().putAll(spec.environmentVariables)
-
-            val process = pb.start()
-            activeProcess = process
-
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    line?.let { logLine(it) }
-                }
-            }
-
-            val exitCode = process.waitFor()
-            logLine("[${ts()}] [ProcessBuilder/INFO]: Процесс OpenJDK завершился с кодом выхода $exitCode")
-            if (exitCode != 0) {
-                fallbackToInProcessBridge = true
-            }
-        } catch (e: Exception) {
-            // На Android 10–15 (targetSdk 36) политика SELinux (W^X app_data_file) может блокировать
-            // прямой дочерний execve() из папки filesDir с кодом error=13 (Permission denied), даже при наличии chmod 755.
-            logLine("[${ts()}] [ProcessBuilder/SELinux]: Прямой вызов execve заблокирован политикой ядра Android (${e.message}).")
-            logLine("[${ts()}] [ProcessBuilder/FALLBACK]: Перевод JRE в режим 0555 (W^X Read-Only Executable) и запуск через системный линкер /system/bin/linker64...")
-
-            javaManager.enforceExecutablePermissions(spec.jreHomeDir, readOnlyDynamicCode = true)
-            val linker64 = File("/system/bin/linker64")
-            var linkerSuccess = false
-            if (linker64.exists() && linker64.canExecute()) {
-                runCatching {
-                    val linkerArgs = buildList {
-                        add(linker64.absolutePath)
-                        addAll(spec.commandArgs)
-                    }
-                    val linkerPb = ProcessBuilder(linkerArgs)
-                    linkerPb.directory(minecraftRootDir)
-                    linkerPb.redirectErrorStream(true)
-                    linkerPb.environment().putAll(spec.environmentVariables)
-                    val proc = linkerPb.start()
-                    activeProcess = proc
-                    BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
-                        var line: String?
-                        while (reader.readLine().also { line = it } != null) {
-                            line?.let { logLine(it) }
-                        }
-                    }
-                    val code = proc.waitFor()
-                    if (code == 0) {
-                        linkerSuccess = true
-                    }
-                }
-            }
-            if (!linkerSuccess) {
-                fallbackToInProcessBridge = true
-            }
+            JREUtils.launchJavaVM(
+                jreHome = spec.jreHomeDir,
+                gameDir = minecraftRootDir,
+                nativesDir = spec.nativesDir,
+                rendererLibName = resolveRendererLibName(spec.renderer),
+                classpath = spec.classpathString,
+                jvmArgs = spec.jvmArguments,
+                mainClass = spec.mainClass,
+                gameArgs = spec.gameArguments,
+                envVars = spec.environmentVariables,
+                latestLogFile = latestLogFile,
+                javaManager = javaManager
+            )
         } finally {
-            activeProcess = null
-        }
-
-        if (fallbackToInProcessBridge) {
-            logLine("[${ts()}] [PojavInProcessBridge/INFO]: Активация внутрипроцессного аппаратного конвейера OpenGL ES (EGL14) на Surface TextureView...")
-            PojavSurfaceEglSession.runHardwareGlSession(spec, renderSurface) { line ->
-                logLine("[${ts()}] $line")
-            }
+            logTailJob.cancelAndJoin()
         }
     }.flowOn(Dispatchers.IO)
 
     fun terminateActiveSession() {
-        runCatching {
-            activeProcess?.destroyForcibly()
-            activeProcess = null
-            PojavNativeBridge.dispatchWindowSurfaceSafely(null)
-        }
+        JREUtils.terminateActiveJvm()
+        CallbackBridge.setupBridgeWindow(null)
     }
 
     private fun resolveRendererLibName(renderer: MobileGlRenderer): String = when (renderer) {
